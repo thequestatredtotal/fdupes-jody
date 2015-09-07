@@ -464,6 +464,7 @@ static uintmax_t grokdir(const char * const restrict dir, file_t ** const restri
       else newfile->next = *filelistp;
 
       newfile->d_name = (char *)newfile + sizeof(file_t);
+      strcpy(newfile->d_name, tempname);
       newfile->user_order = user_dir_count;
       newfile->size = -1;
       newfile->device = 0;
@@ -481,8 +482,6 @@ static uintmax_t grokdir(const char * const restrict dir, file_t ** const restri
       newfile->hash_partial = 0;
       newfile->duplicates = NULL;
       newfile->hasdupes = 0;
-
-      strcpy(newfile->d_name, tempname);
 
       if (ISFLAG(flags, F_EXCLUDEHIDDEN)) {
         /* WARNING: Re-used tempname here to eliminate a strdup() */
@@ -523,13 +522,12 @@ static uintmax_t grokdir(const char * const restrict dir, file_t ** const restri
 
       /* Optionally recurse directories, including symlinked ones if requested */
       if (S_ISDIR(newfile->mode)) {
+	if (ISFLAG(flags, F_RECURSE)
 #ifndef NO_SYMLINKS
-	if (ISFLAG(flags, F_RECURSE) && (ISFLAG(flags, F_FOLLOWLINKS) || !S_ISLNK(linfo.st_mode)))
-          filecount += grokdir(newfile->d_name, filelistp);
-#else
-	if (ISFLAG(flags, F_RECURSE))
-          filecount += grokdir(newfile->d_name, filelistp);
+			&& (ISFLAG(flags, F_FOLLOWLINKS) || !S_ISLNK(linfo.st_mode))
 #endif
+			)
+          filecount += grokdir(newfile->d_name, filelistp);
 	string_free((char *)newfile);
       } else {
         /* Add regular files to list, including symlink targets if requested */
