@@ -92,15 +92,6 @@ off_t excludesize = 0;
 #define INPUT_SIZE 256
 #define PARTIAL_HASH_SIZE 4096
 
-/* These used to be functions. This way saves lots of call overhead */
-#define gethashsignature(a) gethashsignatureuntil(a, 0)
-#define gethashpartialsignature(a) gethashsignatureuntil(a, PARTIAL_HASH_SIZE)
-
-/* TODO: Cachegrind indicates that size, inode, and device get hammered hard
- * in the checkmatch() code and trigger lots of cache line evictions.
- * Maybe we can compact these into a separate structure to improve speed.
- * Also look into compacting the true/false flags into one integer and see
- * if that improves performance (it'll certainly lower memory usage) */
 typedef struct _file {
   char *d_name;
   uint_fast8_t valid_stat; /* Only call stat() once per file (1 = stat'ed) */
@@ -114,10 +105,10 @@ typedef struct _file {
 #endif
   time_t mtime;
   int user_order; /* Order of the originating command-line parameter */
-  hash_t hashpartial;
-  hash_t hashsignature;
-  uint_fast8_t hashpartial_set;  /* 1 = hashpartial is valid */
-  uint_fast8_t hashsignature_set;  /* 1 = hashsignature is valid */
+  hash_t hash_partial;
+  hash_t hash;
+  uint_fast8_t hash_partial_set;  /* 1 = hash_partial is valid */
+  uint_fast8_t hash_set;  /* 1 = hash is valid */
   uint_fast8_t hasdupes; /* 1 only if file is first on duplicate chain */
   struct _file *duplicates;
   struct _file *next;
@@ -484,10 +475,10 @@ static uintmax_t grokdir(const char * const restrict dir, file_t ** const restri
       newfile->gid = 0;
 #endif
       newfile->valid_stat = 0;
-      newfile->hashsignature_set = 0;
-      newfile->hashsignature = 0;
-      newfile->hashpartial_set = 0;
-      newfile->hashpartial = 0;
+      newfile->hash_set = 0;
+      newfile->hash = 0;
+      newfile->hash_partial_set = 0;
+      newfile->hash_partial = 0;
       newfile->duplicates = NULL;
       newfile->hasdupes = 0;
 
@@ -568,7 +559,7 @@ static uintmax_t grokdir(const char * const restrict dir, file_t ** const restri
 }
 
 /* Use Jody Bruchon's hash function on part or all of a file */
-static hash_t *gethashsignatureuntil(file_t * const checkfile,
+static hash_t *get_hash(file_t * const checkfile,
 		const off_t max_read)
 {
   off_t fsize;
@@ -587,7 +578,7 @@ static hash_t *gethashsignatureuntil(file_t * const checkfile,
   if (max_read != 0 && fsize > max_read)
     fsize = max_read;
 
-  /* Initialize the hash and file read parameters (with hashpartial skipped)
+  /* Initialize the hash and file read parameters (with hash_partial skipped)
    *
    * If we already hashed the first chunk of this file, we don't want to
    * wastefully read and hash it again, so skip the first chunk and use
@@ -595,8 +586,8 @@ static hash_t *gethashsignatureuntil(file_t * const checkfile,
    *
    * WARNING: We assume max_read is NEVER less than CHUNK_SIZE here! */
 
-  if (checkfile->hashpartial_set) {
-    *hash = checkfile->hashpartial;
+  if (checkfile->hash_partial_set) {
+    *hash = checkfile->hash_partial;
     /* Don't bother going further if max_read is already fulfilled */
     if (max_read <= CHUNK_SIZE) return hash;
   } else *hash = 0;
@@ -608,8 +599,8 @@ static hash_t *gethashsignatureuntil(file_t * const checkfile,
   }
 
   /* Actually seek past the first chunk if applicable
-   * This is part of the hashpartial skip optimization */
-  if (checkfile->hashpartial_set) {
+   * This is part of the hash_partial skip optimization */
+  if (checkfile->hash_partial_set) {
     if (!fseeko(file, CHUNK_SIZE, SEEK_SET)) {
       fclose(file);
       errormsg("error seeking in file %s\n", checkfile->d_name);
@@ -665,7 +656,7 @@ static file_t **checkmatch(filetree_t * const restrict checktree,
 		file_t * const restrict file)
 {
   int cmpresult = 0;
-  hash_t * restrict hashsignature;
+  hash_t * restrict hash;
 
   /* If device and inode fields are equal one of the files is a
    * hard link to the other or the files have been listed twice
@@ -701,61 +692,61 @@ static file_t **checkmatch(filetree_t * const restrict checktree,
   else {
     /* Attempt to exclude files quickly with partial file hashing */
     partial_hash++;
-    if (checktree->file->hashpartial_set == 0) {
-      hashsignature = gethashpartialsignature(checktree->file);
-      if (hashsignature == NULL) {
+    if (checktree->file->hash_partial_set == 0) {
+      hash = get_hash(checktree->file, PARTIAL_HASH_SIZE);
+      if (hash == NULL) {
         errormsg("cannot read file %s\n", checktree->file->d_name);
         return NULL;
       }
 
-      checktree->file->hashpartial = *hashsignature;
-      checktree->file->hashpartial_set = 1;
+      checktree->file->hash_partial = *hash;
+      checktree->file->hash_partial_set = 1;
     }
 
-    if (file->hashpartial_set == 0) {
-      hashsignature = gethashpartialsignature(file);
-      if (hashsignature == NULL) {
+    if (file->hash_partial_set == 0) {
+      hash = get_hash(file, PARTIAL_HASH_SIZE);
+      if (hash == NULL) {
         errormsg("cannot read file %s\n", file->d_name);
         return NULL;
       }
 
-      file->hashpartial = *hashsignature;
-      file->hashpartial_set = 1;
+      file->hash_partial = *hash;
+      file->hash_partial_set = 1;
     }
 
-    cmpresult = hash_cmp(file->hashpartial, checktree->file->hashpartial);
+    cmpresult = hash_cmp(file->hash_partial, checktree->file->hash_partial);
 
     if (file->size <= PARTIAL_HASH_SIZE) {
-      /* hashpartial = hashsignature if file is small enough */
-      if (file->hashsignature_set == 0) {
-        file->hashsignature = file->hashpartial;
-        file->hashsignature_set = 1;
+      /* hash_partial = hash if file is small enough */
+      if (file->hash_set == 0) {
+        file->hash = file->hash_partial;
+        file->hash_set = 1;
         small_file++;
       }
-      if (checktree->file->hashsignature_set == 0) {
-        checktree->file->hashsignature = checktree->file->hashpartial;
-        checktree->file->hashsignature_set = 1;
+      if (checktree->file->hash_set == 0) {
+        checktree->file->hash = checktree->file->hash_partial;
+        checktree->file->hash_set = 1;
         small_file++;
       }
     } else if (cmpresult == 0) {
       /* If partial match was correct, perform a full file hash match */
-      if (checktree->file->hashsignature_set == 0) {
-	hashsignature = gethashsignature(checktree->file);
-	if (hashsignature == NULL) return NULL;
+      if (checktree->file->hash_set == 0) {
+	hash = get_hash(checktree->file, 0);
+	if (hash == NULL) return NULL;
 
-	checktree->file->hashsignature = *hashsignature;
-        checktree->file->hashsignature_set = 1;
+	checktree->file->hash = *hash;
+        checktree->file->hash_set = 1;
       }
 
-      if (file->hashsignature_set == 0) {
-	hashsignature = gethashsignature(file);
-	if (hashsignature == NULL) return NULL;
+      if (file->hash_set == 0) {
+	hash = get_hash(file,0);
+	if (hash == NULL) return NULL;
 
-	file->hashsignature = *hashsignature;
-	file->hashsignature_set = 1;
+	file->hash = *hash;
+	file->hash_set = 1;
       }
 
-      cmpresult = hash_cmp(file->hashsignature, checktree->file->hashsignature);
+      cmpresult = hash_cmp(file->hash, checktree->file->hash);
 
       /*if (cmpresult != 0) errormsg("P   on %s vs %s\n",
           file->d_name, checktree->file->d_name);
