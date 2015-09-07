@@ -93,8 +93,8 @@ off_t excludesize = 0;
 #define PARTIAL_HASH_SIZE 4096
 
 /* These used to be functions. This way saves lots of call overhead */
-#define getcrcsignature(a) getcrcsignatureuntil(a, 0)
-#define getcrcpartialsignature(a) getcrcsignatureuntil(a, PARTIAL_HASH_SIZE)
+#define gethashsignature(a) gethashsignatureuntil(a, 0)
+#define gethashpartialsignature(a) gethashsignatureuntil(a, PARTIAL_HASH_SIZE)
 
 /* TODO: Cachegrind indicates that size, inode, and device get hammered hard
  * in the checkmatch() code and trigger lots of cache line evictions.
@@ -114,10 +114,10 @@ typedef struct _file {
 #endif
   time_t mtime;
   int user_order; /* Order of the originating command-line parameter */
-  hash_t crcpartial;
-  hash_t crcsignature;
-  uint_fast8_t crcpartial_set;  /* 1 = crcpartial is valid */
-  uint_fast8_t crcsignature_set;  /* 1 = crcsignature is valid */
+  hash_t hashpartial;
+  hash_t hashsignature;
+  uint_fast8_t hashpartial_set;  /* 1 = hashpartial is valid */
+  uint_fast8_t hashsignature_set;  /* 1 = hashsignature is valid */
   uint_fast8_t hasdupes; /* 1 only if file is first on duplicate chain */
   struct _file *duplicates;
   struct _file *next;
@@ -280,7 +280,7 @@ static inline void string_malloc_destroy(void)
 
 
 /* Compare two jody_hashes like memcmp() */
-static inline int crc_cmp(const hash_t hash1, const hash_t hash2)
+static inline int hash_cmp(const hash_t hash1, const hash_t hash2)
 {
 	if (hash1 > hash2) return 1;
 	if (hash1 == hash2) return 0;
@@ -484,10 +484,10 @@ static uintmax_t grokdir(const char * const restrict dir, file_t ** const restri
       newfile->gid = 0;
 #endif
       newfile->valid_stat = 0;
-      newfile->crcsignature_set = 0;
-      newfile->crcsignature = 0;
-      newfile->crcpartial_set = 0;
-      newfile->crcpartial = 0;
+      newfile->hashsignature_set = 0;
+      newfile->hashsignature = 0;
+      newfile->hashpartial_set = 0;
+      newfile->hashpartial = 0;
       newfile->duplicates = NULL;
       newfile->hasdupes = 0;
 
@@ -568,7 +568,7 @@ static uintmax_t grokdir(const char * const restrict dir, file_t ** const restri
 }
 
 /* Use Jody Bruchon's hash function on part or all of a file */
-static hash_t *getcrcsignatureuntil(file_t * const checkfile,
+static hash_t *gethashsignatureuntil(file_t * const checkfile,
 		const off_t max_read)
 {
   off_t fsize;
@@ -587,7 +587,7 @@ static hash_t *getcrcsignatureuntil(file_t * const checkfile,
   if (max_read != 0 && fsize > max_read)
     fsize = max_read;
 
-  /* Initialize the hash and file read parameters (with crcpartial skipped)
+  /* Initialize the hash and file read parameters (with hashpartial skipped)
    *
    * If we already hashed the first chunk of this file, we don't want to
    * wastefully read and hash it again, so skip the first chunk and use
@@ -595,8 +595,8 @@ static hash_t *getcrcsignatureuntil(file_t * const checkfile,
    *
    * WARNING: We assume max_read is NEVER less than CHUNK_SIZE here! */
 
-  if (checkfile->crcpartial_set) {
-    *hash = checkfile->crcpartial;
+  if (checkfile->hashpartial_set) {
+    *hash = checkfile->hashpartial;
     /* Don't bother going further if max_read is already fulfilled */
     if (max_read <= CHUNK_SIZE) return hash;
   } else *hash = 0;
@@ -608,8 +608,8 @@ static hash_t *getcrcsignatureuntil(file_t * const checkfile,
   }
 
   /* Actually seek past the first chunk if applicable
-   * This is part of the crcpartial skip optimization */
-  if (checkfile->crcpartial_set) {
+   * This is part of the hashpartial skip optimization */
+  if (checkfile->hashpartial_set) {
     if (!fseeko(file, CHUNK_SIZE, SEEK_SET)) {
       fclose(file);
       errormsg("error seeking in file %s\n", checkfile->d_name);
@@ -665,7 +665,7 @@ static file_t **checkmatch(filetree_t * const restrict checktree,
 		file_t * const restrict file)
 {
   int cmpresult = 0;
-  hash_t * restrict crcsignature;
+  hash_t * restrict hashsignature;
 
   /* If device and inode fields are equal one of the files is a
    * hard link to the other or the files have been listed twice
@@ -701,61 +701,61 @@ static file_t **checkmatch(filetree_t * const restrict checktree,
   else {
     /* Attempt to exclude files quickly with partial file hashing */
     partial_hash++;
-    if (checktree->file->crcpartial_set == 0) {
-      crcsignature = getcrcpartialsignature(checktree->file);
-      if (crcsignature == NULL) {
+    if (checktree->file->hashpartial_set == 0) {
+      hashsignature = gethashpartialsignature(checktree->file);
+      if (hashsignature == NULL) {
         errormsg("cannot read file %s\n", checktree->file->d_name);
         return NULL;
       }
 
-      checktree->file->crcpartial = *crcsignature;
-      checktree->file->crcpartial_set = 1;
+      checktree->file->hashpartial = *hashsignature;
+      checktree->file->hashpartial_set = 1;
     }
 
-    if (file->crcpartial_set == 0) {
-      crcsignature = getcrcpartialsignature(file);
-      if (crcsignature == NULL) {
+    if (file->hashpartial_set == 0) {
+      hashsignature = gethashpartialsignature(file);
+      if (hashsignature == NULL) {
         errormsg("cannot read file %s\n", file->d_name);
         return NULL;
       }
 
-      file->crcpartial = *crcsignature;
-      file->crcpartial_set = 1;
+      file->hashpartial = *hashsignature;
+      file->hashpartial_set = 1;
     }
 
-    cmpresult = crc_cmp(file->crcpartial, checktree->file->crcpartial);
+    cmpresult = hash_cmp(file->hashpartial, checktree->file->hashpartial);
 
     if (file->size <= PARTIAL_HASH_SIZE) {
-      /* crcpartial = crcsignature if file is small enough */
-      if (file->crcsignature_set == 0) {
-        file->crcsignature = file->crcpartial;
-        file->crcsignature_set = 1;
+      /* hashpartial = hashsignature if file is small enough */
+      if (file->hashsignature_set == 0) {
+        file->hashsignature = file->hashpartial;
+        file->hashsignature_set = 1;
         small_file++;
       }
-      if (checktree->file->crcsignature_set == 0) {
-        checktree->file->crcsignature = checktree->file->crcpartial;
-        checktree->file->crcsignature_set = 1;
+      if (checktree->file->hashsignature_set == 0) {
+        checktree->file->hashsignature = checktree->file->hashpartial;
+        checktree->file->hashsignature_set = 1;
         small_file++;
       }
     } else if (cmpresult == 0) {
       /* If partial match was correct, perform a full file hash match */
-      if (checktree->file->crcsignature_set == 0) {
-	crcsignature = getcrcsignature(checktree->file);
-	if (crcsignature == NULL) return NULL;
+      if (checktree->file->hashsignature_set == 0) {
+	hashsignature = gethashsignature(checktree->file);
+	if (hashsignature == NULL) return NULL;
 
-	checktree->file->crcsignature = *crcsignature;
-        checktree->file->crcsignature_set = 1;
+	checktree->file->hashsignature = *hashsignature;
+        checktree->file->hashsignature_set = 1;
       }
 
-      if (file->crcsignature_set == 0) {
-	crcsignature = getcrcsignature(file);
-	if (crcsignature == NULL) return NULL;
+      if (file->hashsignature_set == 0) {
+	hashsignature = gethashsignature(file);
+	if (hashsignature == NULL) return NULL;
 
-	file->crcsignature = *crcsignature;
-	file->crcsignature_set = 1;
+	file->hashsignature = *hashsignature;
+	file->hashsignature_set = 1;
       }
 
-      cmpresult = crc_cmp(file->crcsignature, checktree->file->crcsignature);
+      cmpresult = hash_cmp(file->hashsignature, checktree->file->hashsignature);
 
       /*if (cmpresult != 0) errormsg("P   on %s vs %s\n",
           file->d_name, checktree->file->d_name);
