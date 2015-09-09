@@ -48,7 +48,6 @@
  #endif
  #include <windows.h>
  #include "getino.h"
-// #define NO_HARDLINKS 1
 #endif
 
 /* How many operations to wait before updating progress counters */
@@ -92,33 +91,72 @@ off_t excludesize = 0;
 #define INPUT_SIZE 256
 #define PARTIAL_HASH_SIZE 4096
 
-typedef struct _file {
-  char *d_name;
-  uint_fast8_t valid_stat; /* Only call stat() once per file (1 = stat'ed) */
-  off_t size;
-  dev_t device;
-  ino_t inode;
-  mode_t mode;
-#ifndef NO_PERMS
-  uid_t uid;
-  gid_t gid;
-#endif
-  time_t mtime;
-  int user_order; /* Order of the originating command-line parameter */
-  hash_t hash_partial;
-  hash_t hash;
-  uint_fast8_t hash_partial_set;  /* 1 = hash_partial is valid */
-  uint_fast8_t hash_set;  /* 1 = hash is valid */
-  uint_fast8_t hasdupes; /* 1 only if file is first on duplicate chain */
-  struct _file *duplicates;
-  struct _file *next;
-} file_t;
+/* File lists array structure
+ *
+ * This is a linked list based on file sizes. 'size' must be unique.
+ * Each element points to the first element of a linked list of file
+ * hash blocks that all share the specified size. */
+struct filesize {
+	struct filesize *size_next;
+	struct fileinfo *next;
+	struct fileinfo *tail;
+	off_t size;
+};
 
-typedef struct _filetree {
-  file_t *file;
-  struct _filetree *left;
-  struct _filetree *right;
-} filetree_t;
+/* Points to the first filesize struct */
+struct filesize *filesize_head;
+
+/* File information block
+ *
+ * This contains all relevant information about a file except size
+ * (which is stored in the parent filesize struct) and is ordered so that
+ * the needed portion will fit in as few cache lines as possible */
+struct fileinfo {
+	char *path;
+	hash_t partial_hash;
+	hash_t hash;
+	uint_fast8_t flags; /* Hash valid: 0 = none, 1 = partial, 2 = both */
+	dev_t device;
+	ino_t inode;
+	struct fileinfo *next;
+	off_t size;	/* TODO: Try to remove this in the future */
+	int match_set;	/* Which match set, if any, this file is in */
+#ifndef NO_PERMS
+	uid_t uid;
+	gid_t gid;
+#endif
+	time_t mtime;
+	int user_order; /* Order of originating command line parameter */
+	mode_t mode;
+};
+
+
+/* How many matched set items are allocated at one time */
+#define MATCH_CHUNK 4
+
+/* Matched file sets
+ *
+ * These contain each matched file set's header. */
+struct matchset {
+	struct matchset *next_set;
+	struct matchset_item *next;
+	int match_count;
+};
+
+/* Matched file set items
+ *
+ * Each element stores pointers to the fileinfo of files that are part of
+ * the match set. These are allocated in multi-file chunks which are
+ * more complicated to follow but reduces memory allocations */
+struct matchset_item {
+	struct fileinfo *match[MATCH_CHUNK];
+	struct matchset *next;
+	uint_fast8_t item_count;
+};
+
+/* Points to the first matched set header */
+struct matchset *matchset_head;
+
 
 /* Hash/compare performance statistics */
 int small_file = 0, partial_hash = 0, partial_to_full = -1, hash_fail = 0;
@@ -269,17 +307,6 @@ static inline void string_malloc_destroy(void)
 }
 
 
-
-/* Compare two jody_hashes like memcmp() */
-static inline int hash_cmp(const hash_t hash1, const hash_t hash2)
-{
-	if (hash1 > hash2) return 1;
-	if (hash1 == hash2) return 0;
-	/* No need to compare a third time */
-	return -1;
-}
-
-
 /* Print error message. NULL will output "out of memory" and exit */
 static void errormsg(char *message, ...)
 {
@@ -300,32 +327,6 @@ static void errormsg(char *message, ...)
   fprintf(stderr, "\r%40s\r%s: ", "", "fdupes");
 #endif
   vfprintf(stderr, message, ap);
-}
-
-
-static void escapefilename(char *escape_list, char **filename_ptr)
-{
-  unsigned int x;
-  unsigned int tx;
-  static char tmp[8192];
-  char *filename;
-
-  filename = *filename_ptr;
-
-  for (x = 0, tx = 0; x < strlen(filename); x++) {
-    if (tx >= 8192) errormsg("escapefilename() path overflow");
-    if (strchr(escape_list, filename[x]) != NULL) tmp[tx++] = '\\';
-    tmp[tx++] = filename[x];
-  }
-
-  tmp[tx] = '\0';
-
-  if (x != tx) {
-    //*filename_ptr = realloc(*filename_ptr, strlen(tmp) + 1);
-    *filename_ptr = string_malloc(strlen(tmp) + 1);
-    if (*filename_ptr == NULL) errormsg(NULL);
-    strcpy(*filename_ptr, tmp);
-  }
 }
 
 
@@ -380,46 +381,84 @@ static int nonoptafter(const char *option, const int argc,
 }
 
 
-static inline void getfilestats(file_t * const restrict file)
+/* stat() a file, returning its size or -1 on failure */
+static inline off_t getfilestats(struct fileinfo * const restrict file)
 {
   static struct stat s;
 
-  /* Don't stat() the same file more than once */
-  if (file->valid_stat == 1) return;
-  file->valid_stat = 1;
+  if (stat(file->path, &s) != 0) return -1;
 
-  if (stat(file->d_name, &s) != 0) {
-/* These are already set during file entry initialization */
-    /* file->size = -1;
-    file->inode = 0;
-    file->device = 0;
-    file->mtime = 0;
-    file->mode = 0;
-    file->uid = 0;
-    file->gid = 0; */
-    return;
-  }
-  file->size = s.st_size;
   file->device = s.st_dev;
   file->mtime = s.st_mtime;
   file->mode = s.st_mode;
+#ifdef ON_WINDOWS
+  file->inode = getino(file->path);
+#else
+  file->inode = s.st_ino;
+#endif /* ON_WINDOWS */
 #ifndef NO_PERMS
   file->uid = s.st_uid;
   file->gid = s.st_gid;
 #endif
-#ifdef ON_WINDOWS
-  file->inode = getino(file->d_name);
-#else
-  file->inode = s.st_ino;
-#endif /* ON_WINDOWS */
-  return;
+  file->size = s.st_size;	/* TODO: try to remove in the future */
+  return s.st_size;
 }
 
 
-static uintmax_t grokdir(const char * const restrict dir, file_t ** const restrict filelistp)
+/* Add a file to the specified filesize list */
+static void register_file(struct fileinfo * restrict file, off_t size)
+{
+	struct filesize *fsz = filesize_head;
+
+	/* Added files will always be at the tail */
+	file->next = NULL;
+
+	/* The first element needs to be allocated differently */
+	if (fsz == NULL) {
+		fsz = string_malloc(sizeof(struct filesize));
+		if (!fsz) errormsg(NULL);
+		filesize_head = fsz;
+		fsz->size_next = NULL;
+		fsz->size = size;
+		fsz->next = file;
+		fsz->tail = file;
+		return;
+	}
+
+	/* Seek to either the correct size or the list end */
+	while (fsz->size != size && fsz->size_next != NULL)
+		fsz = fsz->size_next;
+
+	if (fsz->size != size) {
+		/* Add a new filesize element if we hit the end */
+		fsz->size_next = string_malloc(sizeof(struct filesize));
+		if (!fsz->size_next) errormsg(NULL);
+		fsz = fsz->size_next;
+		fsz->size_next = NULL;
+		fsz->size = size;
+		fsz->next = file;
+		fsz->tail = file;
+		return;
+	} else {
+		/* Add the file to the tail of the found list */
+		fsz->tail->next = file;
+		fsz->tail = file;
+	}
+
+	return;
+}
+
+
+/* Gather information on the contents of a directory.
+ * The general logic works like this: go through the contents of a
+ * directory (recurse found directories if requested), stat() each
+ * file encountered, attempt to exclude as many files as possible
+ * before wasting more work on them, and finally add each file
+ * that was not excluded to the list of duplicate candidates. */
+static uintmax_t load_directory(const char * const restrict dir)
 {
   DIR *cd;
-  file_t *newfile;
+  struct fileinfo *newfile;
   static struct dirent *dirinfo;
   int lastchar;
   uintmax_t filecount = 0;
@@ -427,14 +466,15 @@ static uintmax_t grokdir(const char * const restrict dir, file_t ** const restri
   static struct stat linfo;
 #endif
   static uintmax_t progress = 0, dir_progress = 0;
-  static int grokdir_level = 0;
+  static int load_directory_level = 0;
   static int delay = DELAY_COUNT;
   char *name;
   static char tempname[8192];
+  off_t size;
 
   cd = opendir(dir);
   dir_progress++;
-  grokdir_level++;
+  load_directory_level++;
 
   if (!cd) {
     errormsg("could not chdir to %s\n", dir);
@@ -459,33 +499,30 @@ static uintmax_t grokdir(const char * const restrict dir, file_t ** const restri
       strcat(tempname, dirinfo->d_name);
 
       /* Allocate the file_t and the d_name entries in one shot */
-      newfile = (file_t *)string_malloc(sizeof(file_t) + strlen(dir) + strlen(dirinfo->d_name) + 2);
+      newfile = (struct fileinfo *)string_malloc(sizeof(struct fileinfo)
+		      + strlen(dir) + strlen(dirinfo->d_name) + 2);
       if (!newfile) errormsg(NULL);
-      else newfile->next = *filelistp;
 
-      newfile->d_name = (char *)newfile + sizeof(file_t);
-      strcpy(newfile->d_name, tempname);
-      newfile->user_order = user_dir_count;
-      newfile->size = -1;
+      newfile->path = (char *)newfile + sizeof(struct fileinfo);
+      strcpy(newfile->path, tempname);
+      newfile->partial_hash = 0;
+      newfile->hash = 0;
+      newfile->flags = 0;
       newfile->device = 0;
       newfile->inode = 0;
-      newfile->mtime = 0;
-      newfile->mode = 0;
+      newfile->next = NULL;
+      newfile->match_set = -1;
 #ifndef NO_PERMS
       newfile->uid = 0;
       newfile->gid = 0;
 #endif
-      newfile->valid_stat = 0;
-      newfile->hash_set = 0;
-      newfile->hash = 0;
-      newfile->hash_partial_set = 0;
-      newfile->hash_partial = 0;
-      newfile->duplicates = NULL;
-      newfile->hasdupes = 0;
+      newfile->mtime = 0;
+      newfile->user_order = user_dir_count;
+      newfile->mode = 0;
 
       if (ISFLAG(flags, F_EXCLUDEHIDDEN)) {
         /* WARNING: Re-used tempname here to eliminate a strdup() */
-        strcpy(tempname, newfile->d_name);
+        strcpy(tempname, newfile->path);
         name = basename(tempname);
         if (name[0] == '.' && strcmp(name, ".") && strcmp(name, "..")) {
           string_free((char *)newfile);
@@ -494,27 +531,27 @@ static uintmax_t grokdir(const char * const restrict dir, file_t ** const restri
       }
 
       /* Get file information and check for validity */
-      getfilestats(newfile);
-      if (newfile->size == -1) {
+      size = getfilestats(newfile);
+      if (size == -1) {
 	string_free((char *)newfile);
 	continue;
       }
 
       /* Exclude zero-length files if requested */
-      if (!S_ISDIR(newfile->mode) && newfile->size == 0 && ISFLAG(flags, F_EXCLUDEEMPTY)) {
+      if (!S_ISDIR(newfile->mode) && size == 0 && ISFLAG(flags, F_EXCLUDEEMPTY)) {
 	string_free((char *)newfile);
 	continue;
       }
 
       /* Exclude files below --xsize parameter */
-      if (!S_ISDIR(newfile->mode) && ISFLAG(flags, F_EXCLUDESIZE) && newfile->size < excludesize) {
+      if (!S_ISDIR(newfile->mode) && ISFLAG(flags, F_EXCLUDESIZE) && size < excludesize) {
 	string_free((char *)newfile);
 	continue;
       }
 
 #ifndef NO_SYMLINKS
       /* Get lstat() information */
-      if (lstat(newfile->d_name, &linfo) == -1) {
+      if (lstat(newfile->path, &linfo) == -1) {
 	string_free((char *)newfile);
 	continue;
       }
@@ -527,7 +564,7 @@ static uintmax_t grokdir(const char * const restrict dir, file_t ** const restri
 			&& (ISFLAG(flags, F_FOLLOWLINKS) || !S_ISLNK(linfo.st_mode))
 #endif
 			)
-          filecount += grokdir(newfile->d_name, filelistp);
+          filecount += load_directory(newfile->path);
 	string_free((char *)newfile);
       } else {
         /* Add regular files to list, including symlink targets if requested */
@@ -536,7 +573,7 @@ static uintmax_t grokdir(const char * const restrict dir, file_t ** const restri
 #else
         if (S_ISREG(newfile->mode)) {
 #endif
-	  *filelistp = newfile;
+	  register_file(newfile, size);
 	  filecount++;
           progress++;
 	} else {
@@ -548,8 +585,8 @@ static uintmax_t grokdir(const char * const restrict dir, file_t ** const restri
 
   closedir(cd);
 
-  grokdir_level--;
-  if (grokdir_level == 0 && !ISFLAG(flags, F_HIDEPROGRESS)) {
+  load_directory_level--;
+  if (load_directory_level == 0 && !ISFLAG(flags, F_HIDEPROGRESS)) {
     fprintf(stderr, "\rExamining %ju files, %ju dirs (in %u specified)",
             progress, dir_progress, user_dir_count);
   }
@@ -557,26 +594,31 @@ static uintmax_t grokdir(const char * const restrict dir, file_t ** const restri
 }
 
 /* Use Jody Bruchon's hash function on part or all of a file */
-static hash_t *get_hash(file_t * const checkfile,
-		const off_t max_read)
+static hash_t *get_hash(struct fileinfo * const checkfile,
+		off_t fsize, const off_t max_read)
 {
-  off_t fsize;
   off_t bytes_to_read;
   /* This is an array because we return a pointer to it */
   static hash_t hash[1];
   static hash_t chunk[(CHUNK_SIZE / sizeof(hash_t))];
   FILE *file;
 
-  /* Get the file size. If we can't read it, bail out early */
-  getfilestats(checkfile);
-  if (checkfile->size == -1) return NULL;
-  fsize = checkfile->size;
+  /* Do not re-hash any file which already has valid hashes
+   * This warns the user because it should never happen if the code
+   * is written correctly! All instances of this are considered a bug */
+  if (checkfile->flags > 1) {
+	  *hash = checkfile->hash;
+	  fprintf(stderr, "fdupes internal error: tried to re-hash: '%s'\n",
+			  checkfile->path);
+	  fprintf(stderr, "Please report this bug to the maintainer.\n");
+	  return hash;
+  }
 
   /* Do not read more than the requested number of bytes */
   if (max_read != 0 && fsize > max_read)
     fsize = max_read;
 
-  /* Initialize the hash and file read parameters (with hash_partial skipped)
+  /* Initialize the hash and file read parameters (with partial_hash skipped)
    *
    * If we already hashed the first chunk of this file, we don't want to
    * wastefully read and hash it again, so skip the first chunk and use
@@ -584,24 +626,24 @@ static hash_t *get_hash(file_t * const checkfile,
    *
    * WARNING: We assume max_read is NEVER less than CHUNK_SIZE here! */
 
-  if (checkfile->hash_partial_set) {
-    *hash = checkfile->hash_partial;
+  if (checkfile->flags > 0) {
+    *hash = checkfile->partial_hash;
     /* Don't bother going further if max_read is already fulfilled */
     if (max_read <= CHUNK_SIZE) return hash;
   } else *hash = 0;
 
-  file = fopen(checkfile->d_name, "rb");
+  file = fopen(checkfile->path, "rb");
   if (file == NULL) {
-    errormsg("error opening file %s\n", checkfile->d_name);
+    errormsg("error opening file %s\n", checkfile->path);
     return NULL;
   }
 
   /* Actually seek past the first chunk if applicable
-   * This is part of the hash_partial skip optimization */
-  if (checkfile->hash_partial_set) {
+   * This is part of the partial_hash skip optimization */
+  if (checkfile->flags > 0) {
     if (!fseeko(file, CHUNK_SIZE, SEEK_SET)) {
       fclose(file);
-      errormsg("error seeking in file %s\n", checkfile->d_name);
+      errormsg("error seeking in file %s\n", checkfile->path);
       return NULL;
     }
     fsize -= CHUNK_SIZE;
@@ -611,7 +653,7 @@ static hash_t *get_hash(file_t * const checkfile,
   while (fsize > 0) {
     bytes_to_read = (fsize >= CHUNK_SIZE) ? CHUNK_SIZE : fsize;
     if (fread((void *)chunk, bytes_to_read, 1, file) != 1) {
-      errormsg("error reading from file %s\n", checkfile->d_name);
+      errormsg("error reading from file %s\n", checkfile->path);
       fclose(file);
       return NULL;
     }
@@ -627,154 +669,102 @@ static hash_t *get_hash(file_t * const checkfile,
 }
 
 
-static inline void purgetree(filetree_t *checktree)
+/* TODO: Rewrite for new data structures */
+static int checkmatch(struct fileinfo * const restrict checkfile,
+		struct fileinfo * const restrict file)
 {
-  if (checktree->left != NULL) purgetree(checktree->left);
-  if (checktree->right != NULL) purgetree(checktree->right);
-  string_free(checktree);
-}
-
-
-static inline void registerfile(filetree_t ** restrict branch, file_t * restrict file)
-{
-  getfilestats(file);
-
-  *branch = (filetree_t*)string_malloc(sizeof(filetree_t));
-  if (*branch == NULL) errormsg(NULL);
-
-  (*branch)->file = file;
-  (*branch)->left = NULL;
-  (*branch)->right = NULL;
-
-  return;
-}
-
-
-static file_t **checkmatch(filetree_t * const restrict checktree,
-		file_t * const restrict file)
-{
-  int cmpresult = 0;
   hash_t * restrict hash;
 
-  /* If device and inode fields are equal one of the files is a
-   * hard link to the other or the files have been listed twice
-   * unintentionally. We don't want to flag these files as
-   * duplicates unless the user specifies otherwise. */
-
-  getfilestats(file);
-
-/* If considering hard linked files as duplicates, they are
+/* If device and inode fields are equal one of the files is a
+ * hard link to the other or the files have been listed twice
+ * unintentionally. We don't want to flag these files as
+ * duplicates unless the user specifies otherwise.
+ * If considering hard linked files as duplicates, they are
  * automatically duplicates without being read further since
  * they point to the exact same inode. If we aren't considering
  * hard links as duplicates, we just return NULL. */
 #ifndef NO_HARDLINKS
   if ((file->inode ==
-      checktree->file->inode) && (file->device ==
-      checktree->file->device)) {
-    if (ISFLAG(flags, F_CONSIDERHARDLINKS)) return &checktree->file;
-    else return NULL;
+      checkfile->inode) && (file->device ==
+      checkfile->device)) {
+    if (ISFLAG(flags, F_CONSIDERHARDLINKS)) return 1;
+    else return 0;
   }
 #endif
 
-  /* Exclude files that are not the same size */
-  if (file->size < checktree->file->size) cmpresult = -1;
-  else if (file->size > checktree->file->size) cmpresult = 1;
+  /* XXX: Different sized files don't have to be excluded here anymore */
+
   /* Exclude files by permissions if requested */
-  else if (ISFLAG(flags, F_PERMISSIONS) &&
-            (file->mode != checktree->file->mode
+ if (ISFLAG(flags, F_PERMISSIONS) &&
+            (file->mode != checkfile->mode
 #ifndef NO_PERMS
-            || file->uid != checktree->file->uid
-            || file->gid != checktree->file->gid
+            || file->uid != checkfile->uid
+            || file->gid != checkfile->gid
 #endif
-	    )) cmpresult = -1;
-  else {
-    /* Attempt to exclude files quickly with partial file hashing */
-    partial_hash++;
-    if (checktree->file->hash_partial_set == 0) {
-      hash = get_hash(checktree->file, PARTIAL_HASH_SIZE);
-      if (hash == NULL) {
-        errormsg("cannot read file %s\n", checktree->file->d_name);
-        return NULL;
-      }
+	    )) return 0;
 
-      checktree->file->hash_partial = *hash;
-      checktree->file->hash_partial_set = 1;
+  /* Attempt to exclude files quickly with partial file hashing */
+  partial_hash++;
+  if (checkfile->flags == 0) {
+    hash = get_hash(checkfile, checkfile->size, PARTIAL_HASH_SIZE);
+    if (hash == NULL) {
+      errormsg("cannot read file %s\n", checkfile->path);
+      return 0;
     }
 
-    if (file->hash_partial_set == 0) {
-      hash = get_hash(file, PARTIAL_HASH_SIZE);
-      if (hash == NULL) {
-        errormsg("cannot read file %s\n", file->d_name);
-        return NULL;
-      }
+    checkfile->partial_hash = *hash;
+    checkfile->flags = 1;
+  }
 
-      file->hash_partial = *hash;
-      file->hash_partial_set = 1;
+  if (file->flags == 0) {
+    hash = get_hash(file, checkfile->size, PARTIAL_HASH_SIZE);
+    if (hash == NULL) {
+      errormsg("cannot read file %s\n", file->path);
+      return 0;
     }
 
-    cmpresult = hash_cmp(file->hash_partial, checktree->file->hash_partial);
+    file->partial_hash = *hash;
+    file->flags = 1;
+  }
 
-    if (file->size <= PARTIAL_HASH_SIZE) {
-      /* hash_partial = hash if file is small enough */
-      if (file->hash_set == 0) {
-        file->hash = file->hash_partial;
-        file->hash_set = 1;
-        small_file++;
-      }
-      if (checktree->file->hash_set == 0) {
-        checktree->file->hash = checktree->file->hash_partial;
-        checktree->file->hash_set = 1;
-        small_file++;
-      }
-    } else if (cmpresult == 0) {
-      /* If partial match was correct, perform a full file hash match */
-      if (checktree->file->hash_set == 0) {
-	hash = get_hash(checktree->file, 0);
-	if (hash == NULL) return NULL;
+  if (file->size <= PARTIAL_HASH_SIZE) {
+    /* partial_hash = hash if file is small enough */
+    if (file->flags < 2) {
+      file->hash = file->partial_hash;
+      file->flags = 2;
+      small_file++;
+    }
+    if (checkfile->flags < 2) {
+      checkfile->hash = checkfile->partial_hash;
+      checkfile->flags = 2;
+      small_file++;
+    }
+  } else if (file->partial_hash == checkfile->partial_hash) {
+    /* If partial match was correct, perform a full file hash match */
+    if (checkfile->flags < 2) {
+      hash = get_hash(checkfile, checkfile->size, 0);
+      if (hash == NULL) return 0;
+      checkfile->hash = *hash;
+      checkfile->flags = 2;
+    }
 
-	checktree->file->hash = *hash;
-        checktree->file->hash_set = 1;
-      }
-
-      if (file->hash_set == 0) {
-	hash = get_hash(file,0);
-	if (hash == NULL) return NULL;
+    if (file->flags < 2) {
+	hash = get_hash(file, checkfile->size, 0);
+	if (hash == NULL) return 0;
 
 	file->hash = *hash;
-	file->hash_set = 1;
-      }
-
-      cmpresult = hash_cmp(file->hash, checktree->file->hash);
-
-      /*if (cmpresult != 0) errormsg("P   on %s vs %s\n",
-          file->d_name, checktree->file->d_name);
-      else errormsg("P F on %s vs %s\n", file->d_name,
-          checktree->file->d_name);
-      printf("%s matches %s\n", file->d_name, checktree->file->d_name);*/
+	file->flags = 2;
     }
   }
 
-  if (cmpresult < 0) {
-    if (checktree->left != NULL) {
-      return checkmatch(checktree->left, file);
-    } else {
-      registerfile(&(checktree->left), file);
-      return NULL;
-    }
-  } else if (cmpresult > 0) {
-    if (checktree->right != NULL) {
-      return checkmatch(checktree->right, file);
-    } else {
-      registerfile(&(checktree->right), file);
-      return NULL;
-    }
-  } else {
+  if (file->hash == checkfile->hash) {
     /* All compares matched */
     partial_to_full++;
-    return &checktree->file;
+    return 1;
   }
-  /* Fall through - should never be reached */
-  return NULL;
+
+  /* Fall through - file hashes do not match */
+  return 0;
 }
 
 
@@ -801,6 +791,8 @@ static inline int confirmmatch(FILE * const file1, FILE * const file2)
   return 1;
 }
 
+
+/* TODO: Rewrite for new data structures */
 static void summarizematches(const file_t * restrict files)
 {
   unsigned int numsets = 0;
@@ -843,6 +835,32 @@ static void summarizematches(const file_t * restrict files)
 }
 
 
+static void escapefilename(char *escape_list, char **filename_ptr)
+{
+  unsigned int x;
+  unsigned int tx;
+  static char tmp[8192];
+  char *filename;
+
+  filename = *filename_ptr;
+
+  for (x = 0, tx = 0; x < strlen(filename); x++) {
+    if (tx >= 8192) errormsg("escapefilename() path overflow");
+    if (strchr(escape_list, filename[x]) != NULL) tmp[tx++] = '\\';
+    tmp[tx++] = filename[x];
+  }
+
+  tmp[tx] = '\0';
+
+  if (x != tx) {
+    *filename_ptr = string_malloc(strlen(tmp) + 1);
+    if (*filename_ptr == NULL) errormsg(NULL);
+    strcpy(*filename_ptr, tmp);
+  }
+}
+
+
+/* TODO: Rewrite for new data structures */
 static void printmatches(file_t * restrict files)
 {
   file_t * restrict tmpfile;
@@ -852,13 +870,13 @@ static void printmatches(file_t * restrict files)
       if (!ISFLAG(flags, F_OMITFIRST)) {
 	if (ISFLAG(flags, F_SHOWSIZE)) printf("%jd byte%c each:\n", (intmax_t)files->size,
 	 (files->size != 1) ? 's' : ' ');
-	if (ISFLAG(flags, F_DSAMELINE)) escapefilename("\\ ", &files->d_name);
-	printf("%s%c", files->d_name, ISFLAG(flags, F_DSAMELINE)?' ':'\n');
+	if (ISFLAG(flags, F_DSAMELINE)) escapefilename("\\ ", &files->path);
+	printf("%s%c", files->path, ISFLAG(flags, F_DSAMELINE)?' ':'\n');
       }
       tmpfile = files->duplicates;
       while (tmpfile != NULL) {
-	if (ISFLAG(flags, F_DSAMELINE)) escapefilename("\\ ", &tmpfile->d_name);
-	printf("%s%c", tmpfile->d_name, ISFLAG(flags, F_DSAMELINE)?' ':'\n');
+	if (ISFLAG(flags, F_DSAMELINE)) escapefilename("\\ ", &tmpfile->path);
+	printf("%s%c", tmpfile->path, ISFLAG(flags, F_DSAMELINE)?' ':'\n');
 	tmpfile = tmpfile->duplicates;
       }
       printf("\n");
@@ -870,6 +888,7 @@ static void printmatches(file_t * restrict files)
 }
 
 
+/* TODO: Rewrite for new data structures */
 static void deletefiles(file_t *files, int prompt, FILE *tty)
 {
   int counter;
@@ -920,13 +939,13 @@ static void deletefiles(file_t *files, int prompt, FILE *tty)
       counter = 1;
       dupelist[counter] = files;
 
-      if (prompt) printf("[%d] %s\n", counter, files->d_name);
+      if (prompt) printf("[%d] %s\n", counter, files->path);
 
       tmpfile = files->duplicates;
 
       while (tmpfile) {
 	dupelist[++counter] = tmpfile;
-	if (prompt) printf("[%d] %s\n", counter, tmpfile->d_name);
+	if (prompt) printf("[%d] %s\n", counter, tmpfile->path);
 	tmpfile = tmpfile->duplicates;
       }
 
@@ -987,12 +1006,12 @@ static void deletefiles(file_t *files, int prompt, FILE *tty)
 
       for (x = 1; x <= counter; x++) {
 	if (preserve[x])
-	  printf("   [+] %s\n", dupelist[x]->d_name);
+	  printf("   [+] %s\n", dupelist[x]->path);
 	else {
-	  if (remove(dupelist[x]->d_name) == 0) {
-	    printf("   [-] %s\n", dupelist[x]->d_name);
+	  if (remove(dupelist[x]->path) == 0) {
+	    printf("   [-] %s\n", dupelist[x]->path);
 	  } else {
-	    printf("   [!] %s ", dupelist[x]->d_name);
+	    printf("   [!] %s ", dupelist[x]->path);
 	    printf("-- unable to delete file!\n");
 	  }
 	}
@@ -1006,38 +1025,6 @@ static void deletefiles(file_t *files, int prompt, FILE *tty)
   free(dupelist);
   free(preserve);
   free(preservestr);
-}
-
-
-/* Unused
-static inline int sort_pairs_by_arrival(file_t *f1, file_t *f2)
-{
-  if (f2->duplicates != 0) return 1;
-
-  return -1;
-}
-*/
-
-
-static int sort_pairs_by_param_order(file_t *f1, file_t *f2)
-{
-  if (!ISFLAG(flags, F_USEPARAMORDER)) return 0;
-  if (f1->user_order < f2->user_order) return -1;
-  if (f1->user_order > f2->user_order) return 1;
-  return 0;
-}
-
-
-static int sort_pairs_by_mtime(file_t *f1, file_t *f2)
-{
-  int po = sort_pairs_by_param_order(f1, f2);
-
-  if (po != 0) return po;
-
-  if (f1->mtime < f2->mtime) return -1;
-  else if (f1->mtime > f2->mtime) return 1;
-
-  return 0;
 }
 
 
@@ -1122,57 +1109,8 @@ static inline int numeric_sort(const char * restrict c1,
 }
 
 
-static int sort_pairs_by_filename(file_t *f1, file_t *f2)
-{
-  int po = sort_pairs_by_param_order(f1, f2);
-
-  if (po != 0) return po;
-
-  return numeric_sort(f1->d_name, f2->d_name);
-}
-
-
-static void registerpair(file_t **matchlist, file_t *newmatch,
-		  int (*comparef)(file_t *f1, file_t *f2))
-{
-  file_t *traverse;
-  file_t *back;
-
-  (*matchlist)->hasdupes = 1;
-  back = 0;
-  traverse = *matchlist;
-
-  /* FIXME: This needs to be changed! As it currently stands, the compare
-   * function only runs on a pair as it is registered and future pairs can
-   * mess up the sort order. A separate sorting function should happen before
-   * the dupe chain is acted upon rather than while pairs are registered. */
-  while (traverse) {
-    if (comparef(newmatch, traverse) <= 0) {
-      newmatch->duplicates = traverse;
-
-      if (back == 0) {
-	*matchlist = newmatch; /* update pointer to head of list */
-	newmatch->hasdupes = 1;
-	traverse->hasdupes = 0; /* flag is only for first file in dupe chain */
-      } else back->duplicates = newmatch;
-
-      break;
-    } else {
-      if (traverse->duplicates == 0) {
-	traverse->duplicates = newmatch;
-	if (back == 0) traverse->hasdupes = 1;
-
-	break;
-      }
-    }
-
-    back = traverse;
-    traverse = traverse->duplicates;
-  }
-}
-
-
 #ifndef NO_HARDLINKS
+/* TODO: Rewrite for new data structures */
 static inline void hardlinkfiles(file_t *files)
 {
   file_t *tmpfile;
@@ -1222,53 +1160,53 @@ static inline void hardlinkfiles(file_t *files)
 
       /* Link every file to the first file */
 
-      if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("[SRC] %s\n", dupelist[1]->d_name);
+      if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("[SRC] %s\n", dupelist[1]->path);
       for (x = 2; x <= counter; x++) {
         /* Can't hard link files on different devices */
         if (dupelist[1]->device != dupelist[x]->device) {
 	  fprintf(stderr, "warning: hard link target on different device, not linking:\n-//-> %s\n",
-		  dupelist[x]->d_name);
+		  dupelist[x]->path);
 	  continue;
 	} else {
           /* The devices for the files are the same, but we still need to skip
            * anything that is already hard linked (-L and -H both set) */
           if (dupelist[1]->inode == dupelist[x]->inode) {
-            if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("-==-> %s\n", dupelist[x]->d_name);
+            if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("-==-> %s\n", dupelist[x]->path);
             continue;
           }
         }
         /* Do not attempt to hard link files for which we don't have write access */
-	if (access(dupelist[x]->d_name, W_OK) != 0) {
+	if (access(dupelist[x]->path, W_OK) != 0) {
 	  fprintf(stderr, "warning: hard link target is a read-only file, not linking:\n-//-> %s\n",
-		  dupelist[x]->d_name);
+		  dupelist[x]->path);
 	  continue;
 	}
         /* Safe hard linking: don't actually delete until the link succeeds */
-        strcpy(temp_path, dupelist[x]->d_name);
+        strcpy(temp_path, dupelist[x]->path);
         strcat(temp_path, "._fd_tmp");
-        i = rename(dupelist[x]->d_name, temp_path);
+        i = rename(dupelist[x]->path, temp_path);
         if (i != 0) {
 	  fprintf(stderr, "warning: cannot move hard link target to a temporary name, not linking:\n-//-> %s\n",
-		  dupelist[x]->d_name);
+		  dupelist[x]->path);
           continue;
         }
 
 	errno = 0;
 #ifdef ON_WINDOWS
-        if (CreateHardLink(dupelist[x]->d_name, dupelist[1]->d_name, NULL) == TRUE) {
+        if (CreateHardLink(dupelist[x]->path, dupelist[1]->path, NULL) == TRUE) {
 #else
-        if (link(dupelist[1]->d_name, dupelist[x]->d_name) == 0) {
+        if (link(dupelist[1]->path, dupelist[x]->path) == 0) {
 #endif /* ON_WINDOWS */
-          if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("----> %s\n", dupelist[x]->d_name);
+          if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("----> %s\n", dupelist[x]->path);
         } else {
           /* The hard link failed. Warn the user and put the link target back */
-          if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("-//-> %s ", dupelist[x]->d_name);
+          if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("-//-> %s ", dupelist[x]->path);
 	  fprintf(stderr, "warning: unable to hard link '%s' -> '%s': %s\n",
-			  dupelist[x]->d_name, dupelist[1]->d_name, strerror(errno));
-          i = rename(temp_path, dupelist[x]->d_name);
+			  dupelist[x]->path, dupelist[1]->path, strerror(errno));
+          i = rename(temp_path, dupelist[x]->path);
 	  if (i != 0) {
 		  fprintf(stderr, "error: cannot rename temp file back to original\n");
-		  fprintf(stderr, "original: %s\n", dupelist[x]->d_name);
+		  fprintf(stderr, "original: %s\n", dupelist[x]->path);
 		  fprintf(stderr, "current:  %s\n", temp_path);
 	  }
 	  continue;
@@ -1346,10 +1284,9 @@ int main(int argc, char **argv) {
   int opt;
   FILE *file1;
   FILE *file2;
-  file_t *files = NULL;
-  file_t *curfile;
-  file_t **match = NULL;
-  filetree_t *checktree = NULL;
+  struct fileinfo *files = NULL;
+  struct fileinfo *curfile;
+  struct fileinfo **match = NULL;
   uintmax_t filecount = 0;
   uintmax_t progress = 0;
   uintmax_t dupecount = 0;
@@ -1570,7 +1507,7 @@ int main(int argc, char **argv) {
 
     /* F_RECURSE is not set for directories before --recurse: */
     for (x = optind; x < firstrecurse; x++) {
-      filecount += grokdir(argv[x], &files);
+      filecount += load_directory(argv[x]);
       user_dir_count++;
     }
 
@@ -1578,12 +1515,12 @@ int main(int argc, char **argv) {
     SETFLAG(flags, F_RECURSE);
 
     for (x = firstrecurse; x < argc; x++) {
-      filecount += grokdir(argv[x], &files);
+      filecount += load_directory(argv[x]);
       user_dir_count++;
     }
   } else {
     for (x = optind; x < argc; x++) {
-      filecount += grokdir(argv[x], &files);
+      filecount += load_directory(argv[x]);
       user_dir_count++;
     }
   }
@@ -1592,6 +1529,12 @@ int main(int argc, char **argv) {
   if (!ISFLAG(flags, F_HIDEPROGRESS)) fprintf(stderr, "\n");
   if (!files) exit(0);
 
+/* TODO: Rewrite everything below this for new data structures
+ * - Sorting needs to be handled in a separate function and very differently
+ * - Matches are stored in a set of linked lists (not a tree anymore)
+ * - File deletion, printing, and hard linking can probably be combined
+ *   - The only differences are action taken on a set and output formatting
+ */
   curfile = files;
 
   while (curfile) {
@@ -1608,19 +1551,19 @@ int main(int argc, char **argv) {
 		 (curfile->inode == (*match)->inode) &&
 		 (curfile->device == (*match)->device))
 		) {
-        registerpair(match, curfile,
-            (ordertype == ORDER_TIME) ? sort_pairs_by_mtime : sort_pairs_by_filename);
+/*        registerpair(match, curfile,
+            (ordertype == ORDER_TIME) ? sort_pairs_by_mtime : sort_pairs_by_filename); */
 	dupecount++;
 	goto skip_full_check;
       }
 
-      file1 = fopen(curfile->d_name, "rb");
+      file1 = fopen(curfile->path, "rb");
       if (!file1) {
 	curfile = curfile->next;
 	continue;
       }
 
-      file2 = fopen((*match)->d_name, "rb");
+      file2 = fopen((*match)->path, "rb");
       if (!file2) {
 	fclose(file1);
 	curfile = curfile->next;
@@ -1628,8 +1571,8 @@ int main(int argc, char **argv) {
       }
 
       if (confirmmatch(file1, file2)) {
-        registerpair(match, curfile,
-            (ordertype == ORDER_TIME) ? sort_pairs_by_mtime : sort_pairs_by_filename);
+/*      registerpair(match, curfile,
+            (ordertype == ORDER_TIME) ? sort_pairs_by_mtime : sort_pairs_by_filename); */
 	dupecount++;
       } else hash_fail++;
 
@@ -1674,15 +1617,7 @@ skip_full_check:
     }
   }
 
-  /*
-  while (files) {
-    curfile = files->next;
-    free(files);
-    files = curfile;
-  }
-  */
-
-  purgetree(checktree);
+  /* TODO: free() all normal malloc() allocations */
   string_malloc_destroy();
 
   /* Uncomment this to see hash statistics after running the program
