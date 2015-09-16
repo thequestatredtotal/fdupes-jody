@@ -381,30 +381,6 @@ static int nonoptafter(const char *option, const int argc,
 }
 
 
-/* stat() a file, returning its size or -1 on failure */
-static inline off_t getfilestats(struct fileinfo * const restrict file)
-{
-  static struct stat s;
-
-  if (stat(file->path, &s) != 0) return -1;
-
-  file->device = s.st_dev;
-  file->mtime = s.st_mtime;
-  file->mode = s.st_mode;
-#ifdef ON_WINDOWS
-  file->inode = getino(file->path);
-#else
-  file->inode = s.st_ino;
-#endif /* ON_WINDOWS */
-#ifndef NO_PERMS
-  file->uid = s.st_uid;
-  file->gid = s.st_gid;
-#endif
-  file->size = s.st_size;	/* TODO: try to remove in the future */
-  return s.st_size;
-}
-
-
 /* Add a file to the specified filesize list */
 static void register_file(struct fileinfo * restrict file, off_t size)
 {
@@ -458,6 +434,7 @@ static void register_file(struct fileinfo * restrict file, off_t size)
 static uintmax_t load_directory(const char * const restrict dir)
 {
   DIR *cd;
+  static struct stat s;
   struct fileinfo *newfile;
   static struct dirent *dirinfo;
   int lastchar;
@@ -531,11 +508,25 @@ static uintmax_t load_directory(const char * const restrict dir)
       }
 
       /* Get file information and check for validity */
-      size = getfilestats(newfile);
-      if (size == -1) {
+
+      if (stat(newfile->path, &s) != 0) {
 	string_free((char *)newfile);
 	continue;
       }
+
+      newfile->size = s.st_size;
+      newfile->device = s.st_dev;
+      newfile->mtime = s.st_mtime;
+      newfile->mode = s.st_mode;
+#ifdef ON_WINDOWS
+      newfile->inode = getino(newfile->path);
+#else
+      newfile->inode = s.st_ino;
+#endif /* ON_WINDOWS */
+#ifndef NO_PERMS
+      newfile->uid = s.st_uid;
+      newfile->gid = s.st_gid;
+#endif
 
       /* Exclude zero-length files if requested */
       if (!S_ISDIR(newfile->mode) && size == 0 && ISFLAG(flags, F_EXCLUDEEMPTY)) {
@@ -573,7 +564,7 @@ static uintmax_t load_directory(const char * const restrict dir)
 #else
         if (S_ISREG(newfile->mode)) {
 #endif
-	  register_file(newfile, size);
+	  register_file(newfile);
 	  filecount++;
           progress++;
 	} else {
