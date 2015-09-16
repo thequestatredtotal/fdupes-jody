@@ -60,7 +60,7 @@
 uint_fast32_t flags = 0;
 #define F_RECURSE		0x00000001
 #define F_HIDEPROGRESS		0x00000002
-#define F_DSAMELINE		0x00000004
+//#define F_DSAMELINE		0x00000004
 #define F_FOLLOWLINKS		0x00000008
 #define F_DELETEFILES		0x00000010
 #define F_EXCLUDEEMPTY		0x00000020
@@ -819,31 +819,6 @@ static void summarizematches(const file_t * restrict files)
 }
 
 
-static void escapefilename(char *escape_list, char **filename_ptr)
-{
-  unsigned int x;
-  unsigned int tx;
-  static char tmp[8192];
-  char *filename;
-
-  filename = *filename_ptr;
-
-  for (x = 0, tx = 0; x < strlen(filename); x++) {
-    if (tx >= 8192) errormsg("escapefilename() path overflow");
-    if (strchr(escape_list, filename[x]) != NULL) tmp[tx++] = '\\';
-    tmp[tx++] = filename[x];
-  }
-
-  tmp[tx] = '\0';
-
-  if (x != tx) {
-    *filename_ptr = string_malloc(strlen(tmp) + 1);
-    if (*filename_ptr == NULL) errormsg(NULL);
-    strcpy(*filename_ptr, tmp);
-  }
-}
-
-
 /* TODO: Rewrite for new data structures */
 static void printmatches(file_t * restrict files)
 {
@@ -854,13 +829,11 @@ static void printmatches(file_t * restrict files)
       if (!ISFLAG(flags, F_OMITFIRST)) {
 	if (ISFLAG(flags, F_SHOWSIZE)) printf("%jd byte%c each:\n", (intmax_t)files->size,
 	 (files->size != 1) ? 's' : ' ');
-	if (ISFLAG(flags, F_DSAMELINE)) escapefilename("\\ ", &files->path);
-	printf("%s%c", files->path, ISFLAG(flags, F_DSAMELINE)?' ':'\n');
+	printf("%s\n", files->path);
       }
       tmpfile = files->duplicates;
       while (tmpfile != NULL) {
-	if (ISFLAG(flags, F_DSAMELINE)) escapefilename("\\ ", &tmpfile->path);
-	printf("%s%c", tmpfile->path, ISFLAG(flags, F_DSAMELINE)?' ':'\n');
+	printf("%s\n", tmpfile->path);
 	tmpfile = tmpfile->duplicates;
       }
       printf("\n");
@@ -1232,7 +1205,6 @@ static inline void help_text()
   printf("                  \tSIZE argument accepts 'K', 'M' and 'G' unit suffix\n");
   printf(" -A --nohidden    \texclude hidden files from consideration\n");
   printf(" -f --omitfirst   \tomit the first file in each set of matches\n");
-  printf(" -1 --sameline    \tlist each set of matches on a single line\n");
   printf(" -S --size        \tshow size of duplicate files\n");
   printf(" -m --summarize   \tsummarize dupe information\n");
   printf(" -q --quiet       \thide progress indicator\n");
@@ -1290,7 +1262,6 @@ int main(int argc, char **argv) {
     { "recursive:", 0, 0, 'R' },
     { "quiet", 0, 0, 'q' },
     { "quick", 0, 0, 'Q' },
-    { "sameline", 0, 0, '1' },
     { "size", 0, 0, 'S' },
 #ifndef NO_SYMLINKS
     { "symlinks", 0, 0, 's' },
@@ -1325,7 +1296,7 @@ int main(int argc, char **argv) {
   oldargv = cloneargs(argc, argv);
 
   while ((opt = GETOPT(argc, argv,
-  "frRqQ1SsHLnx:AdvhNmpo:O"
+  "frRqQSsHLnx:AdvhNmpo:O"
 #ifndef OMIT_GETOPT_LONG
           , long_options, NULL
 #endif
@@ -1345,9 +1316,6 @@ int main(int argc, char **argv) {
       break;
     case 'Q':
       SETFLAG(flags, F_QUICKCOMPARE);
-      break;
-    case '1':
-      SETFLAG(flags, F_DSAMELINE);
       break;
     case 'S':
       SETFLAG(flags, F_SHOWSIZE);

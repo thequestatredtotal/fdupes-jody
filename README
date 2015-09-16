@@ -26,7 +26,6 @@ Usage: fdupes [options] DIRECTORY...
                        SIZE argument accepts 'k', 'M' and 'G' unit suffix
  -A --nohidden         exclude hidden files from consideration
  -f --omitfirst        omit the first file in each set of matches
- -1 --sameline         list each set of matches on a single line
  -S --size             show size of duplicate files
  -m --summarize        summarize dupe information
  -q --quiet            hide progress indicator
@@ -47,13 +46,9 @@ Usage: fdupes [options] DIRECTORY...
  -v --version          display fdupes version
  -h --help             display this help message
 
-Unless -1 or --sameline is specified, duplicate files are listed
-together in groups, each file displayed on a separate line. The
-groups are then separated from each other by blank lines.
-
-When -1 or --sameline is specified, spaces and backslash characters (\)
-appearing in a filename are preceded by a backslash character. For
-instance, "with spaces" becomes "with\ spaces".
+Duplicate files are listed together in groups, each file displayed on a
+separate line. The groups are then separated from each other by blank
+lines.
 
 When using -d or --delete, care should be taken to insure against
 accidental data loss. While no information will be immediately

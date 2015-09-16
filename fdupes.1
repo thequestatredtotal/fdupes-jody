@@ -54,9 +54,6 @@ omit the first file in each set of matches
 .B -A --nohidden
 exclude hidden files from consideration
 .TP
-.B -1 --sameline
-list each set of matches on a single line
-.TP
 .B -S --size
 show size of duplicate files
 .TP
@@ -103,20 +100,9 @@ display fdupes version
 .B -h --help
 displays help
 .SH NOTES
-Unless
-.B -1
-or
-.B --sameline
-is specified, duplicate files are listed together in groups, each file
-displayed on a separate line. The groups are then separated from each
-other by blank lines.
-
-When
-.B -1
-or
-.B --sameline
-is specified, spaces and backslash characters  (\fB\e\fP) appearing in
-a filename are preceded by a backslash character.
+Duplicate files are listed together in groups, each file displayed on a
+separate line. The groups are then separated from each other by blank
+lines.
 
 .SH EXAMPLES
 .TP

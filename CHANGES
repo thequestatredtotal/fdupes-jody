@@ -6,6 +6,13 @@ who contributed the patch or idea appears first, followed by
 those who've otherwise worked on that item. For a list of
 contributors names and identifiers please see the CONTRIBUTORS file.
 
+Changes from 2.0 to 3.0 [JLB]
+
+- Major core rewrite; most of the fdupes code was replaced.
+- Dropped -1/--sameline parameter which is not actually necessary
+  (the same effect can be obtained with a WHILE loop in a shell
+  script and even if it couldn't the feature is not very useful.)
+
 Changes from 1.51-jody5 to 2.0 [JLB]
 
 - Bumped major version to 2.0 due to the number of behavioral changes
