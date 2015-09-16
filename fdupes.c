@@ -356,7 +356,7 @@ static int nonoptafter(const char *option, const int argc,
 
 
 /* Add a file to the specified filesize list */
-static void register_file(struct fileinfo * restrict file, off_t size)
+static void register_file(struct fileinfo * restrict file)
 {
 	struct filesize *fsz = filesize_head;
 
@@ -369,23 +369,23 @@ static void register_file(struct fileinfo * restrict file, off_t size)
 		if (!fsz) errormsg(NULL);
 		filesize_head = fsz;
 		fsz->size_next = NULL;
-		fsz->size = size;
+		fsz->size = file->size;
 		fsz->next = file;
 		fsz->tail = file;
 		return;
 	}
 
 	/* Seek to either the correct size or the list end */
-	while (fsz->size != size && fsz->size_next != NULL)
+	while (fsz->size != file->size && fsz->size_next != NULL)
 		fsz = fsz->size_next;
 
-	if (fsz->size != size) {
+	if (fsz->size != file->size) {
 		/* Add a new filesize element if we hit the end */
 		fsz->size_next = string_malloc(sizeof(struct filesize));
 		if (!fsz->size_next) errormsg(NULL);
 		fsz = fsz->size_next;
 		fsz->size_next = NULL;
-		fsz->size = size;
+		fsz->size = file->size;
 		fsz->next = file;
 		fsz->tail = file;
 		return;
@@ -635,7 +635,7 @@ static hash_t *get_hash(struct fileinfo * const checkfile,
 
 
 /* TODO: Rewrite for new data structures */
-static int checkmatch(struct fileinfo * const restrict checkfile,
+static inline int checkmatch(struct fileinfo * const restrict checkfile,
 		struct fileinfo * const restrict file)
 {
   hash_t * restrict hash;
@@ -735,25 +735,44 @@ static int checkmatch(struct fileinfo * const restrict checkfile,
 
 /* Do a byte-by-byte comparison in case two different files produce the
    same signature. Unlikely, but better safe than sorry. */
-static inline int confirmmatch(FILE * const file1, FILE * const file2)
+static inline int confirmmatch(struct fileinfo * const file1, struct fileinfo * const file2)
 {
-  static char c1[CHUNK_SIZE];
-  static char c2[CHUNK_SIZE];
-  size_t r1;
-  size_t r2;
+	FILE *f1;
+	FILE *f2;
+	static char c1[CHUNK_SIZE];
+	static char c2[CHUNK_SIZE];
+	size_t r1;
+	size_t r2;
 
-  fseek(file1, 0, SEEK_SET);
-  fseek(file2, 0, SEEK_SET);
+	f1 = fopen(file1->path, "rb");
+	if (!f1) {
+		return 0;
+	}
 
-  do {
-    r1 = fread(c1, sizeof(char), CHUNK_SIZE, file1);
-    r2 = fread(c2, sizeof(char), CHUNK_SIZE, file2);
+	f2 = fopen(file2->path, "rb");
+	if (!f2) {
+		fclose(f1);
+		return 0;
+	}
 
-    if (r1 != r2) return 0; /* file lengths are different */
-    if (memcmp (c1, c2, r1)) return 0; /* file contents are different */
-  } while (r2);
+	fseek(f1, 0, SEEK_SET);
+	fseek(f2, 0, SEEK_SET);
 
-  return 1;
+	do {
+		r1 = fread(c1, sizeof(char), CHUNK_SIZE, f1);
+		r2 = fread(c2, sizeof(char), CHUNK_SIZE, f2);
+
+		if (r1 != r2) goto no_match; /* file lengths differ (shouldn't happen) */
+		if (memcmp (c1, c2, r1)) goto no_match; /* file contents are different */
+	} while (r2);
+
+	/* Match */
+	fclose(f1); fclose(f2);
+	return 1;
+
+no_match:
+	fclose(f1); fclose(f2);
+	return 0;
 }
 
 
@@ -1503,8 +1522,7 @@ int main(int argc, char **argv) {
   curfile = files;
 
   while (curfile) {
-    if (!checktree) registerfile(&checktree, curfile);
-    else match = checkmatch(checktree, curfile);
+    match = checkmatch(checktree, curfile);
 
     /* Byte-for-byte check that a matched pair are actually matched */
     if (match != NULL) {
@@ -1522,20 +1540,7 @@ int main(int argc, char **argv) {
 	goto skip_full_check;
       }
 
-      file1 = fopen(curfile->path, "rb");
-      if (!file1) {
-	curfile = curfile->next;
-	continue;
-      }
-
-      file2 = fopen((*match)->path, "rb");
-      if (!file2) {
-	fclose(file1);
-	curfile = curfile->next;
-	continue;
-      }
-
-      if (confirmmatch(file1, file2)) {
+      if (confirmmatch(checktree, curfile)) {
 /*      registerpair(match, curfile,
             (ordertype == ORDER_TIME) ? sort_pairs_by_mtime : sort_pairs_by_filename); */
 	dupecount++;
