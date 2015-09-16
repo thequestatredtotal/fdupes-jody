@@ -132,7 +132,7 @@ struct fileinfo {
 
 
 /* How many matched set items are allocated at one time */
-#define MATCH_CHUNK 4
+#define MATCH_CHUNK 8
 
 /* Matched file sets
  *
@@ -150,12 +150,12 @@ struct matchset {
  * more complicated to follow but reduces memory allocations */
 struct matchset_item {
 	struct fileinfo *match[MATCH_CHUNK];
-	struct matchset *next;
+	struct matchset_item *next;
 	uint_fast8_t item_count;
 };
 
-/* Points to the first matched set header */
-struct matchset *matchset_head;
+/* Points to the first matched set header and tail */
+struct matchset *matchset_head, *matchset_tail;
 
 
 /* Hash/compare performance statistics */
@@ -352,6 +352,104 @@ static int nonoptafter(const char *option, const int argc,
   }
 
   return x;
+}
+
+
+/* Add a file pair to the match set tree */
+static int register_match(struct fileinfo *file1, struct fileinfo *file2)
+{
+	struct matchset *ms;
+	struct matchset_item *item;
+	struct fileinfo *add;
+	int set_cnt;
+
+	/* No match set? Make one and use it immediately. */
+	if (!matchset_head) {
+		matchset_head = (struct matchset *)string_malloc(sizeof(struct matchset));
+		if (!matchset_head) errormsg(NULL);
+		matchset_head->next_set = NULL;
+		matchset_tail = matchset_head;
+	}
+
+	/* If either file has a known match set, copy and use it;
+	 * otherwise, make a new match set for the two files */
+	if (file1->match_set == file2->match_set) goto error_match_set_equal;
+	if (file1->match_set >= 0) {
+		if (file2->match_set >= 0) goto error_match_set_positive;
+		file2->match_set = file1->match_set;
+		add = file2;
+	} else if (file2->match_set >= 0) {
+		if (file1->match_set >= 0) goto error_match_set_positive;
+		file1->match_set = file2->match_set;
+		add = file1;
+	} else {
+		/* Seek to end of match set list and allocate new match set */
+		ms = matchset_tail;
+		ms->next_set = (struct matchset *)string_malloc(sizeof(struct matchset));
+		if (!ms) errormsg(NULL);
+
+		/* Jump to new match set and allocate first item chunk */
+		ms = ms->next_set;
+		ms->next = (struct matchset_item *)string_malloc(sizeof(struct matchset_item));
+		item = ms->next;
+		if (!item) errormsg(NULL);
+
+		/* Fill in the new item chunk */
+		ms->match_count = 2;
+		item->next = NULL;
+		item->item_count = 2;
+		item->match[0] = file1;
+		item->match[1] = file2;
+
+		/* Update match set list tail accordingly */
+		matchset_tail = ms;
+		return 0;
+	}
+
+	/* If the last block of code falls through, add the new file to
+	 * the match set specified */
+	ms = matchset_head;
+	set_cnt = 0;
+	while (set_cnt < file1->match_set) {
+		if (!ms->next_set) return -1;
+		ms = ms->next_set;
+		set_cnt++;
+	}
+
+	/* Match set found; now let's find the end of the set */
+	if (ms->next == NULL) goto error_next_item;
+	item = ms->next;
+
+	/* Skip entire match chunks at a time */
+	if (item->item_count == MATCH_CHUNK) {
+		/* If we hit the end, allocate a new empty block */
+		if (!item->next) {
+			item->next = (struct matchset_item *)string_malloc(sizeof(struct matchset_item));
+			if (!item->next) errormsg(NULL);
+			item->next->next = NULL;
+			item->next->item_count = 0;
+		}
+		item = item->next;
+	}
+
+	/* Add the new file to the end of the match list */
+	item->match[item->item_count] = add;
+	item->item_count++;
+	ms->match_count++;
+
+	return 0;
+
+error_match_set_equal:
+	fprintf(stderr, "Internal error: register_match: equal match_set for both files\n");
+	fprintf(stderr, "'%s', '%s'\n", file1->path, file2->path);
+	exit(1);
+error_match_set_positive:
+	fprintf(stderr, "Internal error: register_match: both match_sets are positive\n");
+	fprintf(stderr, "'%s', '%s'\n", file1->path, file2->path);
+	exit(1);
+error_next_item:
+	fprintf(stderr, "Internal error: register_match: ms->next == NULL\n");
+	exit(1);
 }
 
 
@@ -1490,6 +1588,7 @@ int main(int argc, char **argv) {
   curfile = files;
 
   while (curfile) {
+	  /*** TODO: Iterate through filesize lists and build match lists ***/
     match = checkmatch(checktree, curfile);
 
     /* Byte-for-byte check that a matched pair are actually matched */
