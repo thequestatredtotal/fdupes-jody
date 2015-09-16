@@ -547,7 +547,7 @@ static uintmax_t load_directory(const char * const restrict dir)
         strcat(tempname, "/");
       strcat(tempname, dirinfo->d_name);
 
-      /* Allocate the file_t and the d_name entries in one shot */
+      /* Allocate the fileinfo and path storage in one shot */
       newfile = (struct fileinfo *)string_malloc(sizeof(struct fileinfo)
 		      + strlen(dir) + strlen(dirinfo->d_name) + 2);
       if (!newfile) errormsg(NULL);
@@ -875,103 +875,34 @@ no_match:
 
 
 /* TODO: Rewrite for new data structures */
+/* These were tossed because they need a total rewrite
 static void summarizematches(const file_t * restrict files)
-{
-  unsigned int numsets = 0;
-#ifdef NO_FLOAT
-  off_t numbytes = 0;
-#else
-  double numbytes = 0.0;
-#endif /* NO_FLOAT */
-  int numfiles = 0;
-  file_t *tmpfile;
-
-  while (files != NULL) {
-    if (files->hasdupes) {
-      numsets++;
-      tmpfile = files->duplicates;
-      while (tmpfile != NULL) {
-	numfiles++;
-	numbytes += files->size;
-	tmpfile = tmpfile->duplicates;
-      }
-    }
-    files = files->next;
-  }
-
-  if (numsets == 0)
-    printf("No duplicates found.\n");
-  else
-  {
-    printf("%d duplicate files (in %d sets), occupying ", numfiles, numsets);
-#ifdef NO_FLOAT
-    if (numbytes < 1000) printf("%jd byte%c\n", numbytes, (numbytes != 1) ? 's' : ' ');
-    else if (numbytes <= 1000000) printf("%jd KB\n", numbytes / 1000);
-    else printf("%jd MB\n", numbytes / 1000000);
-#else
-    if (numbytes < 1000.0) printf("%.0f bytes\n", numbytes);
-    else if (numbytes <= (1000.0 * 1000.0)) printf("%.1f KB\n", numbytes / 1000.0);
-    else printf("%.1f MB\n", numbytes / (1000.0 * 1000.0));
-#endif /* NO_FLOAT */
-  }
-}
-
-
-/* TODO: Rewrite for new data structures */
 static void printmatches(file_t * restrict files)
-{
-  file_t * restrict tmpfile;
-
-  while (files != NULL) {
-    if (files->hasdupes) {
-      if (!ISFLAG(flags, F_OMITFIRST)) {
-	if (ISFLAG(flags, F_SHOWSIZE)) printf("%jd byte%c each:\n", (intmax_t)files->size,
-	 (files->size != 1) ? 's' : ' ');
-	printf("%s\n", files->path);
-      }
-      tmpfile = files->duplicates;
-      while (tmpfile != NULL) {
-	printf("%s\n", tmpfile->path);
-	tmpfile = tmpfile->duplicates;
-      }
-      printf("\n");
-
-    }
-
-    files = files->next;
-  }
-}
-
-
-/* TODO: Rewrite for new data structures */
 static void deletefiles(file_t *files, int prompt, FILE *tty)
+*/
+
+#ifndef NO_HARDLINKS
+/* TODO: Rewrite for new data structures */
+static inline void hardlinkfiles(void)
 {
+  struct fileinfo *tmpfile;
+  struct fileinfo *curfile;
+  struct fileinfo **dupelist;
   int counter;
-  int groups = 0;
-  int curgroup = 0;
-  file_t *tmpfile;
-  file_t *curfile;
-  file_t **dupelist;
-  int *preserve;
-  char *preservestr;
-  char *token;
-  char *tstr;
-  int number;
-  int sum;
   int max = 0;
-  int x, i;
+  int x = 0;
+  int i;
+  char temp_path[4096];
 
   curfile = files;
 
   while (curfile) {
     if (curfile->hasdupes) {
       counter = 1;
-      groups++;
-
       tmpfile = curfile->duplicates;
       while (tmpfile) {
-	counter++;
-	tmpfile = tmpfile->duplicates;
+       counter++;
+       tmpfile = tmpfile->duplicates;
       }
 
       if (counter > max) max = counter;
@@ -982,105 +913,87 @@ static void deletefiles(file_t *files, int prompt, FILE *tty)
 
   max++;
 
-  dupelist = (file_t**) malloc(sizeof(file_t*) * max);
-  preserve = (int*) malloc(sizeof(int) * max);
-  preservestr = (char*) malloc(INPUT_SIZE);
+  dupelist = (struct fileinfo**) malloc(sizeof(struct fileinfo*) * max);
 
-  if (!dupelist || !preserve || !preservestr) errormsg(NULL);
+  if (!dupelist) errormsg(NULL);
 
   while (files) {
     if (files->hasdupes) {
-      curgroup++;
       counter = 1;
       dupelist[counter] = files;
-
-      if (prompt) printf("[%d] %s\n", counter, files->path);
 
       tmpfile = files->duplicates;
 
       while (tmpfile) {
-	dupelist[++counter] = tmpfile;
-	if (prompt) printf("[%d] %s\n", counter, tmpfile->path);
-	tmpfile = tmpfile->duplicates;
+       counter++;
+       dupelist[counter] = tmpfile;
+       tmpfile = tmpfile->duplicates;
       }
 
-      if (prompt) printf("\n");
+      /* Link every file to the first file */
 
-      /* preserve only the first file */
-      if (!prompt) {
-        preserve[1] = 1;
-        for (x = 2; x <= counter; x++) preserve[x] = 0;
-      } else do {
-        /* prompt for files to preserve */
-	printf("Set %d of %d: keep which files? (1 - %d, [a]ll)",
-          curgroup, groups, counter);
-	if (ISFLAG(flags, F_SHOWSIZE)) printf(" (%jd byte%c each)", (intmax_t)files->size,
-	  (files->size != 1) ? 's' : ' ');
-	printf(": ");
-	fflush(stdout);
+      if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("[SRC] %s\n", dupelist[1]->path);
+      for (x = 2; x <= counter; x++) {
+        /* Can't hard link files on different devices */
+        if (dupelist[1]->device != dupelist[x]->device) {
+	  fprintf(stderr, "warning: hard link target on different device, not linking:\n-//-> %s\n",
+		  dupelist[x]->path);
+	  continue;
+	} else {
+          /* The devices for the files are the same, but we still need to skip
+           * anything that is already hard linked (-L and -H both set) */
+          if (dupelist[1]->inode == dupelist[x]->inode) {
+            if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("-==-> %s\n", dupelist[x]->path);
+            continue;
+          }
+        }
+        /* Do not attempt to hard link files for which we don't have write access */
+	if (access(dupelist[x]->path, W_OK) != 0) {
+	  fprintf(stderr, "warning: hard link target is a read-only file, not linking:\n-//-> %s\n",
+		  dupelist[x]->path);
+	  continue;
+	}
+        /* Safe hard linking: don't actually delete until the link succeeds */
+        strcpy(temp_path, dupelist[x]->path);
+        strcat(temp_path, "._fd_tmp");
+        i = rename(dupelist[x]->path, temp_path);
+        if (i != 0) {
+	  fprintf(stderr, "warning: cannot move hard link target to a temporary name, not linking:\n-//-> %s\n",
+		  dupelist[x]->path);
+          continue;
+        }
 
-	if (!fgets(preservestr, INPUT_SIZE, tty))
-	  preservestr[0] = '\n'; /* treat fgets() failure as if nothing was entered */
-
-	i = strlen(preservestr) - 1;
-
-        /* tail of buffer must be a newline */
-	while (preservestr[i]!='\n') {
-	  tstr = (char*)
-	    realloc(preservestr, strlen(preservestr) + 1 + INPUT_SIZE);
-	  if (!tstr) errormsg(NULL);
-
-	  preservestr = tstr;
-	  if (!fgets(preservestr + i + 1, INPUT_SIZE, tty))
-	  {
-	    preservestr[0] = '\n'; /* treat fgets() failure as if nothing was entered */
-	    break;
+	errno = 0;
+#ifdef ON_WINDOWS
+        if (CreateHardLink(dupelist[x]->path, dupelist[1]->path, NULL) == TRUE) {
+#else
+        if (link(dupelist[1]->path, dupelist[x]->path) == 0) {
+#endif /* ON_WINDOWS */
+          if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("----> %s\n", dupelist[x]->path);
+        } else {
+          /* The hard link failed. Warn the user and put the link target back */
+          if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("-//-> %s ", dupelist[x]->path);
+	  fprintf(stderr, "warning: unable to hard link '%s' -> '%s': %s\n",
+			  dupelist[x]->path, dupelist[1]->path, strerror(errno));
+          i = rename(temp_path, dupelist[x]->path);
+	  if (i != 0) {
+		  fprintf(stderr, "error: cannot rename temp file back to original\n");
+		  fprintf(stderr, "original: %s\n", dupelist[x]->path);
+		  fprintf(stderr, "current:  %s\n", temp_path);
 	  }
-	  i = strlen(preservestr)-1;
-	}
-
-	for (x = 1; x <= counter; x++) preserve[x] = 0;
-
-	token = strtok(preservestr, " ,\n");
-
-	while (token != NULL) {
-	  if (*token == 'a' || *token == 'A')
-	    for (x = 0; x <= counter; x++) preserve[x] = 1;
-
-	  number = 0;
-	  sscanf(token, "%d", &number);
-	  if (number > 0 && number <= counter) preserve[number] = 1;
-
-	  token = strtok(NULL, " ,\n");
-	}
-
-	for (sum = 0, x = 1; x <= counter; x++) sum += preserve[x];
-      } while (sum < 1); /* save at least one file */
-
-      printf("\n");
-
-      for (x = 1; x <= counter; x++) {
-	if (preserve[x])
-	  printf("   [+] %s\n", dupelist[x]->path);
-	else {
-	  if (remove(dupelist[x]->path) == 0) {
-	    printf("   [-] %s\n", dupelist[x]->path);
-	  } else {
-	    printf("   [!] %s ", dupelist[x]->path);
-	    printf("-- unable to delete file!\n");
-	  }
-	}
+	  continue;
+        }
+        i = unlink(temp_path);
+	if (i != 0) fprintf(stderr, "\nwarning: can't delete temp file: %s\n", temp_path);
       }
-      printf("\n");
+      if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("\n");
     }
-
     files = files->next;
   }
 
   free(dupelist);
-  free(preserve);
-  free(preservestr);
 }
+#endif /* NO_HARDLINKS */
 
 
 #define IS_NUM(a) (((a >= '0') && (a <= '9')) ? 1 : 0)
@@ -1164,122 +1077,7 @@ static inline int numeric_sort(const char * restrict c1,
 }
 
 
-#ifndef NO_HARDLINKS
-/* TODO: Rewrite for new data structures */
-static inline void hardlinkfiles(file_t *files)
-{
-  file_t *tmpfile;
-  file_t *curfile;
-  file_t **dupelist;
-  int counter;
-  int max = 0;
-  int x = 0;
-  int i;
-  char temp_path[4096];
-
-  curfile = files;
-
-  while (curfile) {
-    if (curfile->hasdupes) {
-      counter = 1;
-      tmpfile = curfile->duplicates;
-      while (tmpfile) {
-       counter++;
-       tmpfile = tmpfile->duplicates;
-      }
-
-      if (counter > max) max = counter;
-    }
-
-    curfile = curfile->next;
-  }
-
-  max++;
-
-  dupelist = (file_t**) malloc(sizeof(file_t*) * max);
-
-  if (!dupelist) errormsg(NULL);
-
-  while (files) {
-    if (files->hasdupes) {
-      counter = 1;
-      dupelist[counter] = files;
-
-      tmpfile = files->duplicates;
-
-      while (tmpfile) {
-       counter++;
-       dupelist[counter] = tmpfile;
-       tmpfile = tmpfile->duplicates;
-      }
-
-      /* Link every file to the first file */
-
-      if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("[SRC] %s\n", dupelist[1]->path);
-      for (x = 2; x <= counter; x++) {
-        /* Can't hard link files on different devices */
-        if (dupelist[1]->device != dupelist[x]->device) {
-	  fprintf(stderr, "warning: hard link target on different device, not linking:\n-//-> %s\n",
-		  dupelist[x]->path);
-	  continue;
-	} else {
-          /* The devices for the files are the same, but we still need to skip
-           * anything that is already hard linked (-L and -H both set) */
-          if (dupelist[1]->inode == dupelist[x]->inode) {
-            if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("-==-> %s\n", dupelist[x]->path);
-            continue;
-          }
-        }
-        /* Do not attempt to hard link files for which we don't have write access */
-	if (access(dupelist[x]->path, W_OK) != 0) {
-	  fprintf(stderr, "warning: hard link target is a read-only file, not linking:\n-//-> %s\n",
-		  dupelist[x]->path);
-	  continue;
-	}
-        /* Safe hard linking: don't actually delete until the link succeeds */
-        strcpy(temp_path, dupelist[x]->path);
-        strcat(temp_path, "._fd_tmp");
-        i = rename(dupelist[x]->path, temp_path);
-        if (i != 0) {
-	  fprintf(stderr, "warning: cannot move hard link target to a temporary name, not linking:\n-//-> %s\n",
-		  dupelist[x]->path);
-          continue;
-        }
-
-	errno = 0;
-#ifdef ON_WINDOWS
-        if (CreateHardLink(dupelist[x]->path, dupelist[1]->path, NULL) == TRUE) {
-#else
-        if (link(dupelist[1]->path, dupelist[x]->path) == 0) {
-#endif /* ON_WINDOWS */
-          if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("----> %s\n", dupelist[x]->path);
-        } else {
-          /* The hard link failed. Warn the user and put the link target back */
-          if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("-//-> %s ", dupelist[x]->path);
-	  fprintf(stderr, "warning: unable to hard link '%s' -> '%s': %s\n",
-			  dupelist[x]->path, dupelist[1]->path, strerror(errno));
-          i = rename(temp_path, dupelist[x]->path);
-	  if (i != 0) {
-		  fprintf(stderr, "error: cannot rename temp file back to original\n");
-		  fprintf(stderr, "original: %s\n", dupelist[x]->path);
-		  fprintf(stderr, "current:  %s\n", temp_path);
-	  }
-	  continue;
-        }
-        i = unlink(temp_path);
-	if (i != 0) fprintf(stderr, "\nwarning: can't delete temp file: %s\n", temp_path);
-      }
-      if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("\n");
-    }
-    files = files->next;
-  }
-
-  free(dupelist);
-}
-#endif /* NO_HARDLINKS */
-
-
-static inline void help_text()
+static inline void help_text(void)
 {
   printf("Usage: fdupes [options] DIRECTORY...\n\n");
 
@@ -1637,20 +1435,16 @@ skip_full_check:
   if (!ISFLAG(flags, F_HIDEPROGRESS)) fprintf(stderr, "\r%60s\r", " ");
 
   if (ISFLAG(flags, F_DELETEFILES)) {
-    if (ISFLAG(flags, F_NOPROMPT)) deletefiles(files, 0, 0);
-    else deletefiles(files, 1, stdin);
   } else {
 #ifndef NO_HARDLINKS
     if (ISFLAG(flags, F_HARDLINKFILES)) {
-      if (ISFLAG(flags, F_SUMMARIZEMATCHES)) summarizematches(files);
-      hardlinkfiles(files);
+      hardlinkfiles();
     }
 #else
     if (0) {}
 #endif /* NO_HARDLINKS */
     else {
-      if (ISFLAG(flags, F_SUMMARIZEMATCHES)) summarizematches(files);
-      else printmatches(files);
+      //printmatches(files);
     }
   }
 
