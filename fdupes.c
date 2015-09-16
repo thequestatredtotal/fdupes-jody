@@ -187,32 +187,6 @@ static unsigned int sma_lastfree = 0;
 static unsigned int sma_nextfree = sizeof(uintptr_t);
 
 
-/*
-static void dump_string_table(void)
-{
-	char *p = sma_head;
-	unsigned int i = sizeof(uintptr_t);
-	int pg = sma_pages;
-
-	while (pg > 0) {
-		while (i < SMA_PAGE_SIZE && *(p+i) == '\0') i++;
-		printf("[%16p] (%jd) '%s'\n", p+i, strlen(p+i), p+i);
-		i += strlen(p+i);
-		if (pg <= 1 && i >= sma_nextfree) return;
-		if (i < SMA_PAGE_SIZE) i++;
-		else {
-			p = (char *)*(uintptr_t *)p;
-			pg--;
-			i = sizeof(uintptr_t);
-		}
-		if (p == NULL) return;
-	}
-
-	return;
-}
-*/
-
-
 static inline void *string_malloc_page(void)
 {
 	uintptr_t * restrict pageptr;
