@@ -885,68 +885,9 @@ static void deletefiles(file_t *files, int prompt, FILE *tty)
 /* TODO: Rewrite for new data structures */
 static inline void hardlinkfiles(void)
 {
-  struct fileinfo *tmpfile;
-  struct fileinfo *curfile;
-  struct fileinfo **dupelist;
-  int counter;
-  int max = 0;
-  int x = 0;
-  int i;
-  char temp_path[4096];
-
-  curfile = files;
-
-  while (curfile) {
-    if (curfile->hasdupes) {
-      counter = 1;
-      tmpfile = curfile->duplicates;
-      while (tmpfile) {
-       counter++;
-       tmpfile = tmpfile->duplicates;
-      }
-
-      if (counter > max) max = counter;
-    }
-
-    curfile = curfile->next;
-  }
-
-  max++;
-
-  dupelist = (struct fileinfo**) malloc(sizeof(struct fileinfo*) * max);
-
-  if (!dupelist) errormsg(NULL);
-
-  while (files) {
-    if (files->hasdupes) {
-      counter = 1;
-      dupelist[counter] = files;
-
-      tmpfile = files->duplicates;
-
-      while (tmpfile) {
-       counter++;
-       dupelist[counter] = tmpfile;
-       tmpfile = tmpfile->duplicates;
-      }
-
+/* XXX: SNIP SNIP SNIP! */
       /* Link every file to the first file */
-
-      if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("[SRC] %s\n", dupelist[1]->path);
-      for (x = 2; x <= counter; x++) {
         /* Can't hard link files on different devices */
-        if (dupelist[1]->device != dupelist[x]->device) {
-	  fprintf(stderr, "warning: hard link target on different device, not linking:\n-//-> %s\n",
-		  dupelist[x]->path);
-	  continue;
-	} else {
-          /* The devices for the files are the same, but we still need to skip
-           * anything that is already hard linked (-L and -H both set) */
-          if (dupelist[1]->inode == dupelist[x]->inode) {
-            if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("-==-> %s\n", dupelist[x]->path);
-            continue;
-          }
-        }
         /* Do not attempt to hard link files for which we don't have write access */
 	if (access(dupelist[x]->path, W_OK) != 0) {
 	  fprintf(stderr, "warning: hard link target is a read-only file, not linking:\n-//-> %s\n",
@@ -985,13 +926,6 @@ static inline void hardlinkfiles(void)
         }
         i = unlink(temp_path);
 	if (i != 0) fprintf(stderr, "\nwarning: can't delete temp file: %s\n", temp_path);
-      }
-      if (!ISFLAG(flags, F_HIDEPROGRESS)) printf("\n");
-    }
-    files = files->next;
-  }
-
-  free(dupelist);
 }
 #endif /* NO_HARDLINKS */
 
@@ -1437,9 +1371,7 @@ skip_full_check:
   if (ISFLAG(flags, F_DELETEFILES)) {
   } else {
 #ifndef NO_HARDLINKS
-    if (ISFLAG(flags, F_HARDLINKFILES)) {
-      hardlinkfiles();
-    }
+    if (ISFLAG(flags, F_HARDLINKFILES)) hardlinkfiles();
 #else
     if (0) {}
 #endif /* NO_HARDLINKS */
