@@ -507,9 +507,9 @@ static uintmax_t load_directory(const char * const restrict dir)
 {
   DIR *cd;
   static struct stat s;
-  struct fileinfo *newfile;
+  static struct fileinfo *newfile;
   static struct dirent *dirinfo;
-  int lastchar;
+  static int lastchar;
   uintmax_t filecount = 0;
 #ifndef NO_SYMLINKS
   static struct stat linfo;
@@ -517,9 +517,8 @@ static uintmax_t load_directory(const char * const restrict dir)
   static uintmax_t progress = 0, dir_progress = 0;
   static int load_directory_level = 0;
   static int delay = DELAY_COUNT;
-  char *name;
+  static char *name;
   static char tempname[8192];
-  off_t size;
 
   cd = opendir(dir);
   dir_progress++;
@@ -601,13 +600,13 @@ static uintmax_t load_directory(const char * const restrict dir)
 #endif
 
       /* Exclude zero-length files if requested */
-      if (!S_ISDIR(newfile->mode) && size == 0 && ISFLAG(flags, F_EXCLUDEEMPTY)) {
+      if (!S_ISDIR(newfile->mode) && newfile->size == 0 && ISFLAG(flags, F_EXCLUDEEMPTY)) {
 	string_free((char *)newfile);
 	continue;
       }
 
       /* Exclude files below --xsize parameter */
-      if (!S_ISDIR(newfile->mode) && ISFLAG(flags, F_EXCLUDESIZE) && size < excludesize) {
+      if (!S_ISDIR(newfile->mode) && ISFLAG(flags, F_EXCLUDESIZE) && newfile->size < excludesize) {
 	string_free((char *)newfile);
 	continue;
       }
