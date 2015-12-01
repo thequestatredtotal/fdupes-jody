@@ -50,6 +50,14 @@
  #include "getino.h"
 #endif
 
+/* Compile out debugging stat counters unless requested */
+#ifdef DEBUG
+#define DBG(a) a
+#else
+#define DBG(a)
+#endif
+
+
 /* How many operations to wait before updating progress counters */
 #define DELAY_COUNT 512
 
@@ -159,11 +167,16 @@ struct matchset_item {
 struct matchset *matchset_head, *matchset_tail;
 
 
-/* Hash/compare performance statistics */
-int small_file = 0, partial_hash = 0, partial_to_full = -1, hash_fail = 0;
+static uintmax_t filecount = 0; // Required for progress indicator code
+
+/* Hash/compare performance statistics (debug mode) */
+#ifdef DEBUG
+static unsigned int small_file = 0, partial_hash = 0, partial_to_full = 0, hash_fail = 0;
+static uintmax_t comparisons = 0;
+#endif /* DEBUG */
 
 /* Directory parameter position counter */
-int user_dir_count = 1;
+static unsigned int user_dir_count = 1;
 
 /***** End definitions, begin code *****/
 
@@ -504,14 +517,13 @@ static void register_file(struct fileinfo * restrict file)
  * file encountered, attempt to exclude as many files as possible
  * before wasting more work on them, and finally add each file
  * that was not excluded to the list of duplicate candidates. */
-static uintmax_t load_directory(const char * const restrict dir)
+static void load_directory(const char * const restrict dir)
 {
   DIR *cd;
   static struct stat s;
   static struct fileinfo *newfile;
   static struct dirent *dirinfo;
   static int lastchar;
-  uintmax_t filecount = 0;
 #ifndef NO_SYMLINKS
   static struct stat linfo;
 #endif
@@ -527,7 +539,7 @@ static uintmax_t load_directory(const char * const restrict dir)
 
   if (!cd) {
     errormsg("could not chdir to %s\n", dir);
-    return 0;
+    return;
   }
 
   while ((dirinfo = readdir(cd)) != NULL) {
@@ -627,7 +639,7 @@ static uintmax_t load_directory(const char * const restrict dir)
 			&& (ISFLAG(flags, F_FOLLOWLINKS) || !S_ISLNK(linfo.st_mode))
 #endif
 			)
-          filecount += load_directory(newfile->path);
+          load_directory(newfile->path);
 	string_free((char *)newfile);
       } else {
         /* Add regular files to list, including symlink targets if requested */
@@ -653,7 +665,7 @@ static uintmax_t load_directory(const char * const restrict dir)
     fprintf(stderr, "\rExamining %ju files, %ju dirs (in %u specified)",
             progress, dir_progress, user_dir_count);
   }
-  return filecount;
+  return;
 }
 
 /* Use Jody Bruchon's hash function on part or all of a file */
@@ -767,7 +779,7 @@ static inline int checkmatch(struct fileinfo * const restrict checkfile,
 	    )) return 0;
 
   /* Attempt to exclude files quickly with partial file hashing */
-  partial_hash++;
+  DBG(partial_hash++;)
   if (checkfile->flags == 0) {
     hash = get_hash(checkfile, checkfile->size, PARTIAL_HASH_SIZE);
     if (hash == NULL) {
@@ -795,12 +807,12 @@ static inline int checkmatch(struct fileinfo * const restrict checkfile,
     if (file->flags < 2) {
       file->hash = file->partial_hash;
       file->flags = 2;
-      small_file++;
+      DBG(small_file++;)
     }
     if (checkfile->flags < 2) {
       checkfile->hash = checkfile->partial_hash;
       checkfile->flags = 2;
-      small_file++;
+      DBG(small_file++;)
     }
   } else if (file->partial_hash == checkfile->partial_hash) {
     /* If partial match was correct, perform a full file hash match */
@@ -822,7 +834,7 @@ static inline int checkmatch(struct fileinfo * const restrict checkfile,
 
   if (file->hash == checkfile->hash) {
     /* All compares matched */
-    partial_to_full++;
+    DBG(partial_to_full++;)
     return 1;
   }
 
@@ -1073,7 +1085,6 @@ int main(int argc, char **argv) {
   struct fileinfo *files = NULL;
   struct fileinfo *curfile;
   struct fileinfo **match = NULL;
-  uintmax_t filecount = 0;
   uintmax_t progress = 0;
   uintmax_t dupecount = 0;
   char **oldargv;
@@ -1201,7 +1212,9 @@ int main(int argc, char **argv) {
       SETFLAG(flags, F_DELETEFILES);
       break;
     case 'D':
+#ifdef DEBUG
       SETFLAG(flags, F_DEBUG);
+#endif
       break;
     case 'v':
       printf("fdupes %s\n", VERSION);
@@ -1293,7 +1306,7 @@ int main(int argc, char **argv) {
 
     /* F_RECURSE is not set for directories before --recurse: */
     for (x = optind; x < firstrecurse; x++) {
-      filecount += load_directory(argv[x]);
+      load_directory(argv[x]);
       user_dir_count++;
     }
 
@@ -1301,12 +1314,12 @@ int main(int argc, char **argv) {
     SETFLAG(flags, F_RECURSE);
 
     for (x = firstrecurse; x < argc; x++) {
-      filecount += load_directory(argv[x]);
+      load_directory(argv[x]);
       user_dir_count++;
     }
   } else {
     for (x = optind; x < argc; x++) {
-      filecount += load_directory(argv[x]);
+      load_directory(argv[x]);
       user_dir_count++;
     }
   }
@@ -1347,7 +1360,7 @@ int main(int argc, char **argv) {
 /*      registerpair(match, curfile,
             (ordertype == ORDER_TIME) ? sort_pairs_by_mtime : sort_pairs_by_filename); */
 	dupecount++;
-      } else hash_fail++;
+      } DBG(else hash_fail++;)
 
       fclose(file1);
       fclose(file2);
@@ -1387,11 +1400,15 @@ skip_full_check:
   /* TODO: free() all normal malloc() allocations */
   string_malloc_destroy();
 
+#ifdef DEBUG
   if (ISFLAG(flags, F_DEBUG)) {
     fprintf(stderr, "\n%d partial (+%d small) -> %d full (%d partial elim) (%d hash fail)\n",
 		partial_hash, small_file, partial_to_full,
 		(partial_hash - partial_to_full), hash_fail);
+    fprintf(stderr, "%ju total files, %ju comparisons\n",
+		    filecount, comparisons);
   }
+#endif /* DEBUG */
 
   exit(0);
 
