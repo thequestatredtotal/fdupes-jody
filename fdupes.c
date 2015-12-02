@@ -166,7 +166,6 @@ struct matchset_item {
 /* Points to the first matched set header and tail */
 struct matchset *matchset_head, *matchset_tail;
 
-
 static uintmax_t filecount = 0; // Required for progress indicator code
 
 /* Hash/compare performance statistics (debug mode) */
@@ -203,7 +202,7 @@ static unsigned int sma_nextfree = sizeof(uintptr_t);
 
 static inline void *string_malloc_page(void)
 {
-	uintptr_t * restrict pageptr;
+	static uintptr_t * restrict pageptr;
 
 	/* Allocate page and set up pointers at page starts */
 	pageptr = (uintptr_t *)malloc(SMA_PAGE_SIZE);
@@ -1082,9 +1081,7 @@ int main(int argc, char **argv) {
   int opt;
   FILE *file1;
   FILE *file2;
-  struct fileinfo *files = NULL;
-  struct fileinfo *curfile;
-  struct fileinfo **match = NULL;
+  struct filesize *cursize;
   uintmax_t progress = 0;
   uintmax_t dupecount = 0;
   char **oldargv;
@@ -1323,9 +1320,8 @@ int main(int argc, char **argv) {
     }
   }
 
-//  if (!ISFLAG(flags, F_HIDEPROGRESS)) fprintf(stderr, "\r%60s\r", " ");
   if (!ISFLAG(flags, F_HIDEPROGRESS)) fprintf(stderr, "\n");
-  if (!files) exit(EXIT_SUCCESS);
+  if (filecount < 2) exit(EXIT_SUCCESS);
 
 /* TODO: Rewrite everything below this for new data structures
  * - Sorting needs to be handled in a separate function and very differently
@@ -1333,14 +1329,20 @@ int main(int argc, char **argv) {
  * - File deletion, printing, and hard linking can probably be combined
  *   - The only differences are action taken on a set and output formatting
  */
-  curfile = files;
 
-  while (curfile) {
-	  /*** TODO: Iterate through filesize lists and build match lists ***/
-    match = checkmatch(checktree, curfile);
+  // iterate through file size lists one at a time
+  // for each element in current list, check against all following elements
+  // if match is found, register the match
+  // go to next element or next list if at list end
+  // go to next list or finish up if no more lists
+
+  cursize = filesize_head;
+
+  while (cursize) {
+    /*** TODO: Iterate through filesize lists and build match lists ***/
 
     /* Byte-for-byte check that a matched pair are actually matched */
-    if (match != NULL) {
+    if (checkmatch(checktree, curfile) != 0) {
       /* Quick comparison mode will never run confirmmatch()
        * Also skip match confirmation for hard-linked files
        * (This set of comparisons is ugly, but quite efficient) */
