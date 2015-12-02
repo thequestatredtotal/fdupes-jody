@@ -65,7 +65,7 @@
 #define SETFLAG(a,b) (a |= b)
 
 /* Behavior modification flags */
-uint_fast32_t flags = 0;
+static uint_fast32_t flags = 0;
 #define F_RECURSE		0x00000001
 #define F_HIDEPROGRESS		0x00000002
 //#define F_DSAMELINE		0x00000004
@@ -91,9 +91,9 @@ typedef enum {
   ORDER_NAME
 } ordertype_t;
 
-const char *program_name;
+static const char *program_name;
 
-off_t excludesize = 0;
+static off_t excludesize = 0;
 
 /* Larger chunk size makes large files process faster but uses more RAM */
 #define CHUNK_SIZE 1048576
@@ -224,7 +224,7 @@ static inline void *string_malloc_page(void)
 static void *string_malloc(unsigned int len)
 {
 	const char * restrict page = (char *)sma_lastpage;
-	char *retval;
+	static char *retval;
 
 	/* Calling with no actual length is invalid */
 	if (len < 1) return NULL;
@@ -263,7 +263,7 @@ static void *string_malloc(unsigned int len)
 /* Roll back the last allocation */
 static inline void string_free(void *addr)
 {
-	const char * restrict p;
+	static const char * restrict p;
 
 	/* Do nothing on NULL address or no last length */
 	if (addr == NULL) return;
@@ -282,7 +282,7 @@ static inline void string_free(void *addr)
 /* Destroy all allocated pages */
 static inline void string_malloc_destroy(void)
 {
-	uintptr_t *next;
+	static uintptr_t *next;
 
 	while (sma_pages > 0) {
 		next = (uintptr_t *)*(uintptr_t *)sma_head;
@@ -320,8 +320,8 @@ static void errormsg(char *message, ...)
 
 static inline char **cloneargs(const int argc, char **argv)
 {
-  int x;
-  char **args;
+  static int x;
+  static char **args;
 
   args = (char **) string_malloc(sizeof(char*) * argc);
   if (args == NULL) errormsg(NULL);
@@ -339,7 +339,7 @@ static inline char **cloneargs(const int argc, char **argv)
 static int findarg(const char * const arg, const int start,
 		const int argc, char **argv)
 {
-  int x;
+  static int x;
 
   for (x = start; x < argc; x++)
     if (strcmp(argv[x], arg) == 0)
@@ -352,9 +352,9 @@ static int findarg(const char * const arg, const int start,
 static int nonoptafter(const char *option, const int argc,
 		char **oldargv, char **newargv, int optind)
 {
-  int x;
-  int targetind;
-  int testind;
+  static int x;
+  static int targetind;
+  static int testind;
   int startat = 1;
 
   targetind = findarg(option, 1, argc, oldargv);
