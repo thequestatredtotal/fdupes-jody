@@ -124,12 +124,12 @@ struct fileinfo {
 	char *path;
 	hash_t partial_hash;
 	hash_t hash;
-	uint_fast8_t flags; /* Hash valid: 0 = none, 1 = partial, 2 = both */
+	enum { NONE = 0, PARTIAL = 1, FULL = 2 } hashstate;
 	dev_t device;
 	ino_t inode;
 	struct fileinfo *next;
 	off_t size;	/* TODO: Try to remove this in the future */
-	int match_set;	/* Which match set, if any, this file is in */
+	intmax_t match_set;	/* Which match set, if any, this file is in */
 #ifndef NO_PERMS
 	uid_t uid;
 	gid_t gid;
@@ -303,7 +303,7 @@ static void errormsg(char *message, ...)
   /* A null pointer means "out of memory" */
   if (message == NULL) {
     fprintf(stderr, "\r%40s\rout of memory\n", "");
-    exit(1);
+    exit(EXIT_FAILURE);
   }
 
   va_start(ap, message);
@@ -456,14 +456,14 @@ static int register_match(struct fileinfo *file1, struct fileinfo *file2)
 error_match_set_equal:
 	fprintf(stderr, "Internal error: register_match: equal match_set for both files\n");
 	fprintf(stderr, "'%s', '%s'\n", file1->path, file2->path);
-	exit(1);
+	exit(EXIT_FAILURE);
 error_match_set_positive:
 	fprintf(stderr, "Internal error: register_match: both match_sets are positive\n");
 	fprintf(stderr, "'%s', '%s'\n", file1->path, file2->path);
-	exit(1);
+	exit(EXIT_FAILURE);
 error_next_item:
 	fprintf(stderr, "Internal error: register_match: ms->next == NULL\n");
-	exit(1);
+	exit(EXIT_FAILURE);
 }
 
 
@@ -568,7 +568,7 @@ static void load_directory(const char * const restrict dir)
       strcpy(newfile->path, tempname);
       newfile->partial_hash = 0;
       newfile->hash = 0;
-      newfile->flags = 0;
+      newfile->hashstate = NONE;
       newfile->device = 0;
       newfile->inode = 0;
       newfile->next = NULL;
@@ -681,7 +681,7 @@ static hash_t *get_hash(struct fileinfo * const checkfile,
   /* Do not re-hash any file which already has valid hashes
    * This warns the user because it should never happen if the code
    * is written correctly! All instances of this are considered a bug */
-  if (checkfile->flags > 1) {
+  if (checkfile->hashstate == FULL) {
 	  *hash = checkfile->hash;
 	  fprintf(stderr, "fdupes internal error: tried to re-hash: '%s'\n",
 			  checkfile->path);
@@ -701,7 +701,7 @@ static hash_t *get_hash(struct fileinfo * const checkfile,
    *
    * WARNING: We assume max_read is NEVER less than CHUNK_SIZE here! */
 
-  if (checkfile->flags > 0) {
+  if (checkfile->hashstate != NONE) {
     *hash = checkfile->partial_hash;
     /* Don't bother going further if max_read is already fulfilled */
     if (max_read <= CHUNK_SIZE) return hash;
@@ -715,7 +715,7 @@ static hash_t *get_hash(struct fileinfo * const checkfile,
 
   /* Actually seek past the first chunk if applicable
    * This is part of the partial_hash skip optimization */
-  if (checkfile->flags > 0) {
+  if (checkfile->hashstate != NONE) {
     if (!fseeko(file, CHUNK_SIZE, SEEK_SET)) {
       fclose(file);
       errormsg("error seeking in file %s\n", checkfile->path);
@@ -780,7 +780,7 @@ static inline int checkmatch(struct fileinfo * const restrict checkfile,
 
   /* Attempt to exclude files quickly with partial file hashing */
   DBG(partial_hash++;)
-  if (checkfile->flags == 0) {
+  if (checkfile->hashstate == NONE) {
     hash = get_hash(checkfile, checkfile->size, PARTIAL_HASH_SIZE);
     if (hash == NULL) {
       errormsg("cannot read file %s\n", checkfile->path);
@@ -788,10 +788,10 @@ static inline int checkmatch(struct fileinfo * const restrict checkfile,
     }
 
     checkfile->partial_hash = *hash;
-    checkfile->flags = 1;
+    checkfile->hashstate = PARTIAL;
   }
 
-  if (file->flags == 0) {
+  if (file->hashstate == NONE) {
     hash = get_hash(file, checkfile->size, PARTIAL_HASH_SIZE);
     if (hash == NULL) {
       errormsg("cannot read file %s\n", file->path);
@@ -799,36 +799,36 @@ static inline int checkmatch(struct fileinfo * const restrict checkfile,
     }
 
     file->partial_hash = *hash;
-    file->flags = 1;
+    file->hashstate = PARTIAL;
   }
 
   if (file->size <= PARTIAL_HASH_SIZE) {
-    /* partial_hash = hash if file is small enough */
-    if (file->flags < 2) {
+    /* partial_hash is also the full hash if file is small enough */
+    if (file->hashstate != FULL) {
       file->hash = file->partial_hash;
-      file->flags = 2;
+      file->hashstate = FULL;
       DBG(small_file++;)
     }
-    if (checkfile->flags < 2) {
+    if (checkfile->hashstate != FULL) {
       checkfile->hash = checkfile->partial_hash;
-      checkfile->flags = 2;
+      checkfile->hashstate = FULL;
       DBG(small_file++;)
     }
   } else if (file->partial_hash == checkfile->partial_hash) {
     /* If partial match was correct, perform a full file hash match */
-    if (checkfile->flags < 2) {
+    if (checkfile->hashstate != FULL) {
       hash = get_hash(checkfile, checkfile->size, 0);
       if (hash == NULL) return 0;
       checkfile->hash = *hash;
-      checkfile->flags = 2;
+      checkfile->hashstate = FULL;
     }
 
-    if (file->flags < 2) {
+    if (file->hashstate != FULL) {
 	hash = get_hash(file, checkfile->size, 0);
 	if (hash == NULL) return 0;
 
 	file->hash = *hash;
-	file->flags = 2;
+	file->hashstate = FULL;
     }
   }
 
@@ -873,7 +873,7 @@ static inline int confirmmatch(struct fileinfo * const file1, struct fileinfo * 
 		r2 = fread(c2, sizeof(char), CHUNK_SIZE, f2);
 
 		if (r1 != r2) goto no_match; /* file lengths differ (shouldn't happen) */
-		if (memcmp (c1, c2, r1)) goto no_match; /* file contents are different */
+		if (memcmp(c1, c2, r1)) goto no_match; /* file contents are different */
 	} while (r2);
 
 	/* Match */
@@ -1089,7 +1089,6 @@ int main(int argc, char **argv) {
   uintmax_t dupecount = 0;
   char **oldargv;
   int firstrecurse;
-  ordertype_t ordertype = ORDER_TIME;
   int delay = DELAY_COUNT;
   char *endptr;
 
@@ -1202,7 +1201,7 @@ int main(int argc, char **argv) {
       }
       if (*endptr != '\0') {
         errormsg("invalid value for --xsize: '%s'\n", optarg);
-        exit(1);
+        exit(EXIT_FAILURE);
       }
       break;
     case 'A':
@@ -1242,7 +1241,7 @@ int main(int argc, char **argv) {
       exit(0);
     case 'h':
       help_text();
-      exit(1);
+      exit(EXIT_FAILURE);
     case 'N':
       SETFLAG(flags, F_NOPROMPT);
       break;
@@ -1257,40 +1256,40 @@ int main(int argc, char **argv) {
       break;
     case 'o':
       if (!strncasecmp("name", optarg, 5)) {
-        ordertype = ORDER_NAME;
+        //ordertype = ORDER_NAME;
       } else if (!strncasecmp("time", optarg, 5)) {
-        ordertype = ORDER_TIME;
+        //ordertype = ORDER_TIME;
       } else {
         errormsg("invalid value for --order: '%s'\n", optarg);
-        exit(1);
+        exit(EXIT_FAILURE);
       }
       break;
 
     default:
       fprintf(stderr, "Try `fdupes --help' for more information.\n");
-      exit(1);
+      exit(EXIT_FAILURE);
     }
   }
 
   if (optind >= argc) {
     errormsg("no directories specified\n");
-    exit(1);
+    exit(EXIT_FAILURE);
   }
 #ifndef NO_HARDLINKS
   if (ISFLAG(flags, F_HARDLINKFILES) && ISFLAG(flags, F_DELETEFILES)) {
     errormsg("options --linkhard and --delete are not compatible\n");
-    exit(1);
+    exit(EXIT_FAILURE);
   }
 
 #endif	/* NO_HARDLINKS */
   if (ISFLAG(flags, F_RECURSE) && ISFLAG(flags, F_RECURSEAFTER)) {
     errormsg("options --recurse and --recurse: are not compatible\n");
-    exit(1);
+    exit(EXIT_FAILURE);
   }
 
   if (ISFLAG(flags, F_SUMMARIZEMATCHES) && ISFLAG(flags, F_DELETEFILES)) {
     errormsg("options --summarize and --delete are not compatible\n");
-    exit(1);
+    exit(EXIT_FAILURE);
   }
 
   if (ISFLAG(flags, F_RECURSEAFTER)) {
@@ -1301,7 +1300,7 @@ int main(int argc, char **argv) {
 
     if (firstrecurse == argc) {
       errormsg("-R option must be isolated from other options\n");
-      exit(1);
+      exit(EXIT_FAILURE);
     }
 
     /* F_RECURSE is not set for directories before --recurse: */
@@ -1326,7 +1325,7 @@ int main(int argc, char **argv) {
 
 //  if (!ISFLAG(flags, F_HIDEPROGRESS)) fprintf(stderr, "\r%60s\r", " ");
   if (!ISFLAG(flags, F_HIDEPROGRESS)) fprintf(stderr, "\n");
-  if (!files) exit(0);
+  if (!files) exit(EXIT_SUCCESS);
 
 /* TODO: Rewrite everything below this for new data structures
  * - Sorting needs to be handled in a separate function and very differently
@@ -1350,15 +1349,13 @@ int main(int argc, char **argv) {
 		 (curfile->inode == (*match)->inode) &&
 		 (curfile->device == (*match)->device))
 		) {
-/*        registerpair(match, curfile,
-            (ordertype == ORDER_TIME) ? sort_pairs_by_mtime : sort_pairs_by_filename); */
+/*        registerpair(match, curfile); */
 	dupecount++;
 	goto skip_full_check;
       }
 
       if (confirmmatch(checktree, curfile)) {
-/*      registerpair(match, curfile,
-            (ordertype == ORDER_TIME) ? sort_pairs_by_mtime : sort_pairs_by_filename); */
+/*      registerpair(match, curfile); */
 	dupecount++;
       } DBG(else hash_fail++;)
 
@@ -1410,6 +1407,5 @@ skip_full_check:
   }
 #endif /* DEBUG */
 
-  exit(0);
-
+  exit(EXIT_SUCCESS);
 }
