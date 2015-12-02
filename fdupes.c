@@ -38,6 +38,8 @@
 #include <libgen.h>
 #include "jody_hash.h"
 
+#define DLOG(...) fprintf(stdout, __VA_ARGS__)
+
 /* Detect Windows and modify as needed */
 #if defined _WIN32 || defined __CYGWIN__
  #define ON_WINDOWS 1
@@ -386,7 +388,6 @@ static int register_match(struct fileinfo *file1, struct fileinfo *file2)
 
 	/* If either file has a known match set, copy and use it;
 	 * otherwise, make a new match set for the two files */
-	if (file1->match_set == file2->match_set) goto error_match_set_equal;
 	if (file1->match_set >= 0) {
 		if (file2->match_set >= 0) goto error_match_set_positive;
 		file2->match_set = file1->match_set;
@@ -452,10 +453,6 @@ static int register_match(struct fileinfo *file1, struct fileinfo *file2)
 
 	return 0;
 
-error_match_set_equal:
-	fprintf(stderr, "Internal error: register_match: equal match_set for both files\n");
-	fprintf(stderr, "'%s', '%s'\n", file1->path, file2->path);
-	exit(EXIT_FAILURE);
 error_match_set_positive:
 	fprintf(stderr, "Internal error: register_match: both match_sets are positive\n");
 	fprintf(stderr, "'%s', '%s'\n", file1->path, file2->path);
@@ -520,8 +517,8 @@ static void load_directory(const char * const restrict dir)
 {
   DIR *cd;
   static struct stat s;
-  static struct fileinfo *newfile;
-  static struct dirent *dirinfo;
+  struct fileinfo *newfile;
+  struct dirent *dirinfo;
   static int lastchar;
 #ifndef NO_SYMLINKS
   static struct stat linfo;
@@ -593,8 +590,8 @@ static void load_directory(const char * const restrict dir)
       /* Get file information and check for validity */
 
       if (stat(newfile->path, &s) != 0) {
-	string_free((char *)newfile);
-	continue;
+        string_free((char *)newfile);
+        continue;
       }
 
       newfile->size = s.st_size;
@@ -613,8 +610,8 @@ static void load_directory(const char * const restrict dir)
 
       /* Exclude zero-length files if requested */
       if (!S_ISDIR(newfile->mode) && newfile->size == 0 && ISFLAG(flags, F_EXCLUDEEMPTY)) {
-	string_free((char *)newfile);
-	continue;
+        string_free((char *)newfile);
+        continue;
       }
 
       /* Exclude files below --xsize parameter */
@@ -672,6 +669,7 @@ static hash_t *get_hash(struct fileinfo * const checkfile,
 		off_t fsize, const off_t max_read)
 {
   off_t bytes_to_read;
+  int x;
   /* This is an array because we return a pointer to it */
   static hash_t hash[1];
   static hash_t chunk[(CHUNK_SIZE / sizeof(hash_t))];
@@ -726,8 +724,9 @@ static hash_t *get_hash(struct fileinfo * const checkfile,
   /* Read the file in CHUNK_SIZE chunks until we've read it all. */
   while (fsize > 0) {
     bytes_to_read = (fsize >= CHUNK_SIZE) ? CHUNK_SIZE : fsize;
-    if (fread((void *)chunk, bytes_to_read, 1, file) != 1) {
-      errormsg("error reading from file %s\n", checkfile->path);
+    x = fread((void *)chunk, 1, bytes_to_read, file);
+    if (x != bytes_to_read) {
+      errormsg("error: short read: %s (%d of %d)\n", checkfile->path, x, bytes_to_read);
       fclose(file);
       return NULL;
     }
@@ -868,8 +867,8 @@ static inline int confirmmatch(struct fileinfo * const file1, struct fileinfo * 
 	fseek(f2, 0, SEEK_SET);
 
 	do {
-		r1 = fread(c1, sizeof(char), CHUNK_SIZE, f1);
-		r2 = fread(c2, sizeof(char), CHUNK_SIZE, f2);
+		r1 = fread(c1, 1, CHUNK_SIZE, f1);
+		r2 = fread(c2, 1, CHUNK_SIZE, f2);
 
 		if (r1 != r2) goto no_match; /* file lengths differ (shouldn't happen) */
 		if (memcmp(c1, c2, r1)) goto no_match; /* file contents are different */
@@ -891,6 +890,8 @@ static void summarizematches(const file_t * restrict files)
 static void printmatches(file_t * restrict files)
 static void deletefiles(file_t *files, int prompt, FILE *tty)
 */
+
+#if 0
 
 #ifndef NO_HARDLINKS
 /* TODO: Rewrite for new data structures */
@@ -939,6 +940,9 @@ static inline void hardlinkfiles(void)
 	if (i != 0) fprintf(stderr, "\nwarning: can't delete temp file: %s\n", temp_path);
 }
 #endif /* NO_HARDLINKS */
+
+
+#endif /* 0 */
 
 
 #define IS_NUM(a) (((a >= '0') && (a <= '9')) ? 1 : 0)
@@ -1079,9 +1083,8 @@ static inline void help_text(void)
 int main(int argc, char **argv) {
   int x;
   int opt;
-  FILE *file1;
-  FILE *file2;
   struct filesize *cursize;
+  struct fileinfo *curfile, *comparefile;
   uintmax_t progress = 0;
   uintmax_t dupecount = 0;
   char **oldargv;
@@ -1278,7 +1281,7 @@ int main(int argc, char **argv) {
     exit(EXIT_FAILURE);
   }
 
-#endif	/* NO_HARDLINKS */
+#endif /* NO_HARDLINKS */
   if (ISFLAG(flags, F_RECURSE) && ISFLAG(flags, F_RECURSEAFTER)) {
     errormsg("options --recurse and --recurse: are not compatible\n");
     exit(EXIT_FAILURE);
@@ -1336,54 +1339,66 @@ int main(int argc, char **argv) {
   // go to next element or next list if at list end
   // go to next list or finish up if no more lists
 
+  /* This loop processes the list of file chain heads */
   cursize = filesize_head;
-
   while (cursize) {
-    /*** TODO: Iterate through filesize lists and build match lists ***/
-
-    /* Byte-for-byte check that a matched pair are actually matched */
-    if (checkmatch(checktree, curfile) != 0) {
-      /* Quick comparison mode will never run confirmmatch()
-       * Also skip match confirmation for hard-linked files
-       * (This set of comparisons is ugly, but quite efficient) */
-      if (ISFLAG(flags, F_QUICKCOMPARE) ||
-		(ISFLAG(flags, F_CONSIDERHARDLINKS) &&
-		 (curfile->inode == (*match)->inode) &&
-		 (curfile->device == (*match)->device))
-		) {
-/*        registerpair(match, curfile); */
-	dupecount++;
-	goto skip_full_check;
+DLOG("Main loop, cursize = %jd\n", (intmax_t)cursize->size);
+    curfile = cursize->next;
+    if (!curfile) errormsg("Internal error: curfile == NULL. File a bug report!\n");
+    comparefile = curfile->next;
+    /* Don't process chains with only one file */
+    if (!comparefile) {
+      cursize = cursize->size_next;
+      continue;
+    }
+    /* This loop processes the current file chain */
+    while (curfile) {
+DLOG("Chain loop, file: '%s'\n", curfile->path);
+      /* This loop performs all comparisons against the current file */
+      while (comparefile) {
+DLOG("Comparing against '%s'\n", comparefile->path);
+        if (checkmatch(curfile, comparefile) != 0) {
+          /* Quick comparison mode will never run confirmmatch()
+           * Also skip match confirmation for hard-linked files
+           * (This set of comparisons is ugly, but quite efficient) */
+          if (ISFLAG(flags, F_QUICKCOMPARE) ||
+    		(ISFLAG(flags, F_CONSIDERHARDLINKS) &&
+    		 (curfile->inode == comparefile->inode) &&
+    		 (curfile->device == comparefile->device))
+    		) {
+            register_match(curfile, comparefile);
+            dupecount++;
+            goto skip_full_check;
+          }
+    
+          if (confirmmatch(curfile, comparefile)) {
+            register_match(curfile, comparefile);
+            dupecount++;
+          } DBG(else hash_fail++;)
+    
+        }
+        comparefile = comparefile->next;
       }
-
-      if (confirmmatch(checktree, curfile)) {
-/*      registerpair(match, curfile); */
-	dupecount++;
-      } DBG(else hash_fail++;)
-
-      fclose(file1);
-      fclose(file2);
-    }
-
 skip_full_check:
-    curfile = curfile->next;
-
-    if (!ISFLAG(flags, F_HIDEPROGRESS)) {
-      /* If file size is larger than 1 MiB, make progress update faster
-       * If confirmmatch() is run on a file, speed up progress even further */
-      if (curfile != NULL) delay += (curfile->size >> 20);
-      if (match != NULL) delay++;
-      if ((delay >= DELAY_COUNT)) {
-        delay = 0;
-        fprintf(stderr, "\rProgress [%ju/%ju, %ju pairs matched] %ju%%", progress, filecount,
-          dupecount, (progress * 100) / filecount);
-      } else delay++;
-      progress++;
+      if (!ISFLAG(flags, F_HIDEPROGRESS)) {
+        /* If file size is larger than 1 MiB, make progress update faster
+         * If confirmmatch() is run on a file, speed up progress even further */
+        if (curfile != NULL) delay += (curfile->size >> 20);
+        if (delay >= DELAY_COUNT) {
+          delay = 0;
+          fprintf(stderr, "\rProgress [%ju/%ju, %ju pairs matched] %ju%%",
+            progress, filecount, dupecount, (progress * 100) / filecount);
+        } else delay++;
+        progress++;
+      }
+      curfile = curfile->next;
     }
+    cursize = cursize->size_next;
   }
 
   if (!ISFLAG(flags, F_HIDEPROGRESS)) fprintf(stderr, "\r%60s\r", " ");
 
+#if 0
   if (ISFLAG(flags, F_DELETEFILES)) {
   } else {
 #ifndef NO_HARDLINKS
@@ -1395,6 +1410,9 @@ skip_full_check:
       //printmatches(files);
     }
   }
+#else
+  //printmatches();
+#endif /* 0 */
 
   /* TODO: free() all normal malloc() allocations */
   string_malloc_destroy();
@@ -1402,10 +1420,9 @@ skip_full_check:
 #ifdef DEBUG
   if (ISFLAG(flags, F_DEBUG)) {
     fprintf(stderr, "\n%d partial (+%d small) -> %d full (%d partial elim) (%d hash fail)\n",
-		partial_hash, small_file, partial_to_full,
-		(partial_hash - partial_to_full), hash_fail);
+      partial_hash, small_file, partial_to_full, (partial_hash - partial_to_full), hash_fail);
     fprintf(stderr, "%ju total files, %ju comparisons\n",
-		    filecount, comparisons);
+      filecount, comparisons);
   }
 #endif /* DEBUG */
 
