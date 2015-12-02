@@ -38,7 +38,8 @@
 #include <libgen.h>
 #include "jody_hash.h"
 
-#define DLOG(...) fprintf(stdout, __VA_ARGS__)
+//#define DLOG(...) fprintf(stdout, __VA_ARGS__)
+#define DLOG(...)
 
 /* Detect Windows and modify as needed */
 #if defined _WIN32 || defined __CYGWIN__
@@ -112,6 +113,7 @@ struct filesize {
 	struct fileinfo *next;
 	struct fileinfo *tail;
 	off_t size;
+	uintmax_t count;
 };
 
 /* Points to the first filesize struct */
@@ -166,7 +168,8 @@ struct matchset_item {
 };
 
 /* Points to the first matched set header and tail */
-struct matchset *matchset_head, *matchset_tail;
+static struct matchset *matchset_head, *matchset_tail;
+static int match_tail_number = 0;
 
 static uintmax_t filecount = 0; // Required for progress indicator code
 
@@ -378,12 +381,14 @@ static int register_match(struct fileinfo *file1, struct fileinfo *file2)
 	struct fileinfo *add;
 	int set_cnt;
 
+	DLOG("register match: %s => %s\n", file1->path, file2->path);
 	/* No match set? Make one and use it immediately. */
 	if (!matchset_head) {
 		matchset_head = (struct matchset *)string_malloc(sizeof(struct matchset));
 		if (!matchset_head) errormsg(NULL);
 		matchset_head->next_set = NULL;
 		matchset_tail = matchset_head;
+		match_tail_number = 1;
 	}
 
 	/* If either file has a known match set, copy and use it;
@@ -414,9 +419,12 @@ static int register_match(struct fileinfo *file1, struct fileinfo *file2)
 		item->item_count = 2;
 		item->match[0] = file1;
 		item->match[1] = file2;
+		file1->match_set = match_tail_number;
+		file2->match_set = match_tail_number;
 
 		/* Update match set list tail accordingly */
 		matchset_tail = ms;
+		match_tail_number++;
 		return 0;
 	}
 
@@ -435,7 +443,7 @@ static int register_match(struct fileinfo *file1, struct fileinfo *file2)
 	item = ms->next;
 
 	/* Skip entire match chunks at a time */
-	if (item->item_count == MATCH_CHUNK) {
+	while (item->item_count == MATCH_CHUNK) {
 		/* If we hit the end, allocate a new empty block */
 		if (!item->next) {
 			item->next = (struct matchset_item *)string_malloc(sizeof(struct matchset_item));
@@ -468,6 +476,7 @@ static void register_file(struct fileinfo * restrict file)
 {
 	struct filesize *fsz = filesize_head;
 
+	DLOG("registering file: %s (size %jd): ", file->path, file->size);
 	/* Added files will always be at the tail */
 	file->next = NULL;
 
@@ -478,8 +487,10 @@ static void register_file(struct fileinfo * restrict file)
 		filesize_head = fsz;
 		fsz->size_next = NULL;
 		fsz->size = file->size;
+		fsz->count = 1;
 		fsz->next = file;
 		fsz->tail = file;
+		DLOG("first chain allocated\n");
 		return;
 	}
 
@@ -494,13 +505,17 @@ static void register_file(struct fileinfo * restrict file)
 		fsz = fsz->size_next;
 		fsz->size_next = NULL;
 		fsz->size = file->size;
+		fsz->count = 1;
 		fsz->next = file;
 		fsz->tail = file;
+		DLOG("new chain allocated\n");
 		return;
 	} else {
 		/* Add the file to the tail of the found list */
+		fsz->count++;
 		fsz->tail->next = file;
 		fsz->tail = file;
+		DLOG("added to existing chain\n");
 	}
 
 	return;
@@ -748,6 +763,7 @@ static inline int checkmatch(struct fileinfo * const restrict checkfile,
 {
   hash_t * restrict hash;
 
+  DLOG("checkmatch: %s & %s\n", checkfile->path, file->path);
 /* If device and inode fields are equal one of the files is a
  * hard link to the other or the files have been listed twice
  * unintentionally. We don't want to flag these files as
@@ -852,6 +868,7 @@ static inline int confirmmatch(struct fileinfo * const file1, struct fileinfo * 
 	size_t r1;
 	size_t r2;
 
+	DLOG("confirmmatch: %s & %s\n", file1->path, file2->path);
 	f1 = fopen(file1->path, "rb");
 	if (!f1) {
 		return 0;
@@ -890,6 +907,37 @@ static void summarizematches(const file_t * restrict files)
 static void printmatches(file_t * restrict files)
 static void deletefiles(file_t *files, int prompt, FILE *tty)
 */
+
+static void printmatches(void)
+{
+	struct matchset *ms;
+	struct matchset_item *item;
+	int item_cnt, chain = 0, set;
+
+	ms = matchset_head;
+	/* Chain 0 is always empty; skip it */
+	if (!ms->next_set) return;
+	ms = ms->next_set;
+
+	while (ms) {
+		DLOG("Chain %d (%d matches)\n", ++chain, ms->match_count);
+		item = ms->next;
+		set = 0;
+		while (item) {
+			DLOG("Chain chunk %d (%d items)\n", ++set, item->item_count);
+			item_cnt = 0;
+
+			while (item_cnt < item->item_count) {
+				printf("%s\n", item->match[item_cnt]->path);
+				item_cnt++;
+			}
+			item = item->next;
+		}
+		printf("\n");
+		ms = ms->next_set;
+	}
+	return;
+}
 
 #if 0
 
@@ -1345,18 +1393,24 @@ int main(int argc, char **argv) {
 DLOG("Main loop, cursize = %jd\n", (intmax_t)cursize->size);
     curfile = cursize->next;
     if (!curfile) errormsg("Internal error: curfile == NULL. File a bug report!\n");
-    comparefile = curfile->next;
     /* Don't process chains with only one file */
-    if (!comparefile) {
+    if (!curfile->next) {
       cursize = cursize->size_next;
       continue;
     }
     /* This loop processes the current file chain */
     while (curfile) {
-DLOG("Chain loop, file: '%s'\n", curfile->path);
+DLOG("Chain loop (%ju files of size %jd), file '%s'\n", cursize->count, cursize->size, curfile->path);
       /* This loop performs all comparisons against the current file */
+      comparefile = curfile->next;
       while (comparefile) {
 DLOG("Comparing against '%s'\n", comparefile->path);
+	/* If the two files are already in match sets, don't compare them */
+        if (curfile->match_set > 0 && comparefile->match_set > 0) {
+		DLOG("*** Already matched: %jd, %jd\n",
+				curfile->match_set, comparefile->match_set);
+		goto skip_compare;
+	}
         if (checkmatch(curfile, comparefile) != 0) {
           /* Quick comparison mode will never run confirmmatch()
            * Also skip match confirmation for hard-linked files
@@ -1368,28 +1422,25 @@ DLOG("Comparing against '%s'\n", comparefile->path);
     		) {
             register_match(curfile, comparefile);
             dupecount++;
-            goto skip_full_check;
-          }
-    
-          if (confirmmatch(curfile, comparefile)) {
+          } else if (confirmmatch(curfile, comparefile)) {
             register_match(curfile, comparefile);
             dupecount++;
           } DBG(else hash_fail++;)
-    
+        }
+
+skip_compare:
+        if (!ISFLAG(flags, F_HIDEPROGRESS)) {
+          /* If file size is larger than 1 MiB, make progress update faster
+           * If confirmmatch() is run on a file, speed up progress even further */
+          if (curfile != NULL) delay += (curfile->size >> 20);
+          if (delay >= DELAY_COUNT) {
+            delay = 0;
+            fprintf(stderr, "\rProgress [%ju/%ju, %ju pairs matched] %ju%%",
+              progress, filecount, dupecount, (progress * 100) / filecount);
+          } else delay++;
+          progress++;
         }
         comparefile = comparefile->next;
-      }
-skip_full_check:
-      if (!ISFLAG(flags, F_HIDEPROGRESS)) {
-        /* If file size is larger than 1 MiB, make progress update faster
-         * If confirmmatch() is run on a file, speed up progress even further */
-        if (curfile != NULL) delay += (curfile->size >> 20);
-        if (delay >= DELAY_COUNT) {
-          delay = 0;
-          fprintf(stderr, "\rProgress [%ju/%ju, %ju pairs matched] %ju%%",
-            progress, filecount, dupecount, (progress * 100) / filecount);
-        } else delay++;
-        progress++;
       }
       curfile = curfile->next;
     }
@@ -1411,7 +1462,7 @@ skip_full_check:
     }
   }
 #else
-  //printmatches();
+  printmatches();
 #endif /* 0 */
 
   /* TODO: free() all normal malloc() allocations */
