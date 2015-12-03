@@ -103,20 +103,19 @@ static off_t excludesize = 0;
 #define INPUT_SIZE 256
 #define PARTIAL_HASH_SIZE 4096
 
-/* File lists array structure
- *
- * This is a linked list based on file sizes. 'size' must be unique.
- * Each element points to the first element of a linked list of file
- * hash blocks that all share the specified size. */
+/* This is a tree based on file sizes. The "weight" is a count of
+ * how many nodes exist in that direction and is updated on each
+ * insertion. */
 struct filesize {
-	struct filesize *size_next;
-	struct fileinfo *next;
-	struct fileinfo *tail;
+	struct filesize *left;
+	struct filesize *right;
+	off_t left_weight;
+	off_t right_weight;
+	struct fileinfo *list;	// Linked list of files starts here
 	off_t size;
-	uintmax_t count;
 };
 
-/* Points to the first filesize struct */
+/* Points to the filesize tree root node */
 struct filesize *filesize_head;
 
 /* File information block
@@ -474,7 +473,9 @@ error_next_item:
 /* Add a file to the specified filesize list */
 static void register_file(struct fileinfo * restrict file)
 {
-	struct filesize *fsz = filesize_head;
+	static struct filesize *fsz;
+
+	fsz = filesize_head;
 
 	DLOG("registering file: %s (size %jd): ", file->path, file->size);
 	/* Added files will always be at the tail */
@@ -487,7 +488,6 @@ static void register_file(struct fileinfo * restrict file)
 		filesize_head = fsz;
 		fsz->size_next = NULL;
 		fsz->size = file->size;
-		fsz->count = 1;
 		fsz->next = file;
 		fsz->tail = file;
 		DLOG("first chain allocated\n");
@@ -505,14 +505,12 @@ static void register_file(struct fileinfo * restrict file)
 		fsz = fsz->size_next;
 		fsz->size_next = NULL;
 		fsz->size = file->size;
-		fsz->count = 1;
 		fsz->next = file;
 		fsz->tail = file;
 		DLOG("new chain allocated\n");
 		return;
 	} else {
 		/* Add the file to the tail of the found list */
-		fsz->count++;
 		fsz->tail->next = file;
 		fsz->tail = file;
 		DLOG("added to existing chain\n");
