@@ -132,7 +132,7 @@ struct fileinfo {
 	ino_t inode;
 	struct fileinfo *next;
 	off_t size;	/* TODO: Try to remove this in the future */
-	intmax_t match_set;	/* Which match set, if any, this file is in */
+	struct matchset *set;	/* Which match set, if any, this file is in */
 #ifndef NO_PERMS
 	uid_t uid;
 	gid_t gid;
@@ -166,9 +166,8 @@ struct matchset_item {
 	uint_fast8_t item_count;
 };
 
-/* Points to the first matched set header and tail */
-static struct matchset *matchset_head, *matchset_tail;
-static int match_tail_number = 0;
+/* Points to the first matched set head */
+static struct matchset *matchset_head;
 
 static uintmax_t filecount = 0; // Required for progress indicator code
 
@@ -372,7 +371,7 @@ static int nonoptafter(const char *option, const int argc,
 }
 
 
-/* Add a file pair to the match set tree */
+/* Add a file pair to the match set list */
 static int register_match(struct fileinfo *file1, struct fileinfo *file2)
 {
 	struct matchset *ms;
@@ -386,21 +385,21 @@ static int register_match(struct fileinfo *file1, struct fileinfo *file2)
 		matchset_head = (struct matchset *)string_malloc(sizeof(struct matchset));
 		if (!matchset_head) errormsg(NULL);
 		matchset_head->next_set = NULL;
-		matchset_tail = matchset_head;
-		match_tail_number = 1;
 	}
 
 	/* If either file has a known match set, copy and use it;
 	 * otherwise, make a new match set for the two files */
-	if (file1->match_set >= 0) {
-		if (file2->match_set >= 0) goto error_match_set_positive;
-		file2->match_set = file1->match_set;
+	// TODO: Convert logic to use *set instead of match_set
+	if (file1->set) {
+		if (file2->set) goto error_set_positive;
+		file2->set = file1->set;
 		add = file2;
-	} else if (file2->match_set >= 0) {
-		if (file1->match_set >= 0) goto error_match_set_positive;
-		file1->match_set = file2->match_set;
+	} else if (file2->set) {
+		if (file1->set) goto error_set_positive;
+		file1->set = file2->set;
 		add = file1;
 	} else {
+		// TODO: Remove tail logic; add matches at list head instead
 		/* Seek to end of match set list and allocate new match set */
 		ms = matchset_tail;
 		ms->next_set = (struct matchset *)string_malloc(sizeof(struct matchset));
@@ -418,12 +417,8 @@ static int register_match(struct fileinfo *file1, struct fileinfo *file2)
 		item->item_count = 2;
 		item->match[0] = file1;
 		item->match[1] = file2;
-		file1->match_set = match_tail_number;
-		file2->match_set = match_tail_number;
-
-		/* Update match set list tail accordingly */
-		matchset_tail = ms;
-		match_tail_number++;
+		file1->set = match_tail_number;
+		file2->set = match_tail_number;
 		return 0;
 	}
 
@@ -460,8 +455,8 @@ static int register_match(struct fileinfo *file1, struct fileinfo *file2)
 
 	return 0;
 
-error_match_set_positive:
-	fprintf(stderr, "Internal error: register_match: both match_sets are positive\n");
+error_set_positive:
+	fprintf(stderr, "Internal error: register_match: both sets are non-NULL\n");
 	fprintf(stderr, "'%s', '%s'\n", file1->path, file2->path);
 	exit(EXIT_FAILURE);
 error_next_item:
@@ -477,6 +472,8 @@ static void register_file(struct fileinfo * restrict file)
 
 	fsz = filesize_head;
 
+	// TODO: Rewrite the entire function to use the new tree
+
 	DLOG("registering file: %s (size %jd): ", file->path, file->size);
 	/* Added files will always be at the tail */
 	file->next = NULL;
@@ -489,7 +486,6 @@ static void register_file(struct fileinfo * restrict file)
 		fsz->size_next = NULL;
 		fsz->size = file->size;
 		fsz->next = file;
-		fsz->tail = file;
 		DLOG("first chain allocated\n");
 		return;
 	}
@@ -506,7 +502,6 @@ static void register_file(struct fileinfo * restrict file)
 		fsz->size_next = NULL;
 		fsz->size = file->size;
 		fsz->next = file;
-		fsz->tail = file;
 		DLOG("new chain allocated\n");
 		return;
 	} else {
@@ -581,7 +576,7 @@ static void load_directory(const char * const restrict dir)
       newfile->device = 0;
       newfile->inode = 0;
       newfile->next = NULL;
-      newfile->match_set = -1;
+      newfile->set = NULL;
 #ifndef NO_PERMS
       newfile->uid = 0;
       newfile->gid = 0;
@@ -1404,9 +1399,9 @@ DLOG("Chain loop (%ju files of size %jd), file '%s'\n", cursize->count, cursize-
       while (comparefile) {
 DLOG("Comparing against '%s'\n", comparefile->path);
 	/* If the two files are already in match sets, don't compare them */
-        if (curfile->match_set > 0 && comparefile->match_set > 0) {
+        if (curfile->set && comparefile->set) {
 		DLOG("*** Already matched: %jd, %jd\n",
-				curfile->match_set, comparefile->match_set);
+				curfile->set, comparefile->set);
 		goto skip_compare;
 	}
         if (checkmatch(curfile, comparefile) != 0) {
